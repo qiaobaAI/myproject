@@ -1,0 +1,70 @@
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Java并发框架AQS深度解析笔记</title><style>
+:root{--bg:#f7f8fa;--fg:#1f2328;--muted:#6b7280;--accent:#1a73e8;--line:#e6e8eb}
+*{box-sizing:border-box}
+body{font-family:system-ui,"Microsoft YaHei",sans-serif;margin:0;display:flex;height:100vh;color:var(--fg);background:var(--bg)}
+#left{flex:1;min-width:0;background:#000;display:flex;align-items:center;justify-content:center}
+#left video{width:100%;height:100%;object-fit:contain}
+#right{width:50%;min-width:380px;overflow:auto;padding:24px 28px 70px;background:#fff}
+#right h1{font-size:22px;margin:0 0 6px}
+.meta{color:var(--muted);font-size:12px;margin-bottom:14px}
+.intro{background:#f0f6ff;border-left:3px solid var(--accent);padding:10px 12px;border-radius:6px;font-size:14px;line-height:1.75;margin-bottom:16px}
+.toc{background:#fafbfc;border:1px solid var(--line);border-radius:8px;padding:10px 14px;margin-bottom:18px;font-size:14px}
+.toc b{display:block;margin-bottom:6px;color:var(--muted);font-size:12px;letter-spacing:.5px}
+.toc a{display:block;color:var(--accent);text-decoration:none;padding:3px 0}
+.toc a:hover{text-decoration:underline}
+.sec{border-bottom:1px solid var(--line);padding:14px 0 18px}
+.sec h2{font-size:17px;margin:0 0 8px;scroll-margin-top:12px}
+.ts{color:var(--accent);cursor:pointer;font-size:12px;font-weight:400;background:#eef4ff;border-radius:10px;padding:2px 9px;white-space:nowrap}
+.ts:hover{background:#dde9ff}
+.sec ul{margin:6px 0;padding-left:20px}
+.sec li{line-height:1.85;margin:5px 0;font-size:14px}
+.note{background:#fff8e6;border-left:3px solid #f0b400;padding:8px 11px;border-radius:6px;font-size:13px;color:#7a5b00;margin:9px 0;line-height:1.7}
+.shot{width:100%;border:1px solid var(--line);border-radius:8px;margin:11px 0 4px;cursor:pointer;display:block}
+.shot:hover{box-shadow:0 3px 14px rgba(0,0,0,.16)}
+table.kt{width:100%;border-collapse:collapse;font-size:13px;margin:10px 0 22px}
+table.kt th,table.kt td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top;line-height:1.6}
+table.kt th{background:#f2f4f7;font-weight:600}
+table.kt tr:nth-child(even) td{background:#fafbfc}
+.lv{color:#e8a33d;white-space:nowrap;text-align:center;letter-spacing:1px}
+.quiz{background:#f7f9fc;border-radius:8px;padding:11px 13px;margin:9px 0;font-size:14px}
+.quiz .q{font-weight:600;margin:0 0 5px}
+.quiz .a{margin:0;color:#374151;line-height:1.7}
+.deep{background:#f3fbf6;border-left:3px solid #2e9e5b;padding:10px 12px;border-radius:6px;font-size:13.5px;color:#1d4d33;margin:10px 0;line-height:1.75}
+.code-desc{background:#eef2ff;border-left:3px solid #5b6bff;padding:8px 11px;border-radius:6px;font-size:13px;color:#2a2f66;margin:10px 0 4px;line-height:1.7}
+pre.code{background:#0f172a;color:#e2e8f0;border-radius:8px;padding:12px 14px;overflow:auto;font-size:12.5px;line-height:1.6;margin:4px 0 10px}
+pre.code code{font-family:"SFMono-Regular",Consolas,"Courier New",monospace;white-space:pre}
+h2.blk{font-size:17px;margin:22px 0 8px}
+</style></head><body><div id="left"><video id="v" controls poster="截图/frame_000001.jpg"></video></div><div id="right"><h1>Java并发框架AQS深度解析笔记</h1><div class="meta">🎬 本地视频 · 本地大模型生成 · 全程不出本机 · 点时间戳或截图可跳转视频</div><div class="intro">💡 <b>导读：</b>本视频系统解析Java并发包核心组件AQS(抽象队列同步器)，解决多线程环境下锁机制实现与线程协调问题。学完可掌握AQS核心概念、两种工作模式、底层实现原理及实际应用场景，为理解ReentrantLock等并发工具奠定理论基础。</div><div class="toc"><b>目录</b><a href="#sec1">1. AQS概念与核心组成</a><a href="#sec2">2. AQS的两种工作模式</a><a href="#sec3">3. AQS底层实现原理</a><a href="#sec4">4. AQS在并发工具中的应用</a></div><div class="sec" id="sec1"><h2>1. AQS概念与核心组成 <span class="ts" data-ts="00:00">⏱️ 00:00</span></h2><ul><li>AQS全称AbstractQueuedSynchronizer，是Java并发包(java.util.concurrent.locks)中的核心同步框架</li><li>它通过维护FIFO等待队列实现线程调度，包含三个核心要素：同步状态(State)、等待队列(Queue)、状态转换机制</li><li>AQS本质是抽象类，需通过继承实现具体同步逻辑，如ReentrantLock的非公平锁实现就继承自AQS</li></ul><div class="note">🔎 <b>考点/易混点：</b>注意AQS与synchronized关键字的区别：synchronized是JVM层面的锁机制，AQS是Java代码实现的同步框架</div><div class="deep">🔍 <b>底层原理 / 延伸：</b>将等待队列比作小区物业接待处的叫号系统。当业主(线程)来办事(请求锁)，先取号(入队)，按顺序叫号(调度)。若当前号(状态)被占用，就排队等待，这对应AQS的FIFO队列机制。</div><div class="code-desc">📝 <b>代码说明：</b>AQS核心抽象类定义，包含state状态变量和等待队列</div><pre class="code"><code data-lang="java">public abstract class AbstractQueuedSynchronizer {
+    private volatile int state;
+    private transient Node head;
+    private transient Node tail;
+    //...
+}</code></pre><img class="shot" loading="lazy" src="截图/frame_000001.jpg" data-ts="00:00" alt="AQS概念与核心组成"></div><div class="sec" id="sec2"><h2>2. AQS的两种工作模式 <span class="ts" data-ts="04:00">⏱️ 04:00</span></h2><ul><li>排他模式(独占模式)：同一时刻仅允许一个线程持有锁，如ReentrantLock的默认实现</li><li>共享模式：允许多个线程同时持有锁，典型应用是Semaphore的许可控制</li><li>两种模式通过state状态值的读写策略区分，排他模式直接操作state，共享模式需处理state的增量/减量</li></ul><div class="note">🔎 <b>考点/易混点：</b>注意排他模式与共享模式的兼容性：共享模式获取锁后，排他模式获取会失败，反之亦然</div><div class="deep">🔍 <b>底层原理 / 延伸：</b>将共享模式类比为图书馆的座位分配。当有10个座位时，多个读者(线程)可同时占用，但超过10人就要排队。这种资源池管理方式对应AQS的共享模式设计。</div><div class="code-desc">📝 <b>代码说明：</b>共享模式获取锁的典型实现，通过CAS更新state值</div><pre class="code"><code data-lang="java">protected final boolean tryAcquireShared(int arg) {
+    // 实现共享锁获取逻辑
+    return (getState() &lt; 0) ? 1 : -1;
+}</code></pre><img class="shot" loading="lazy" src="截图/frame_000005.jpg" data-ts="04:00" alt="AQS的两种工作模式"></div><div class="sec" id="sec3"><h2>3. AQS底层实现原理 <span class="ts" data-ts="07:00">⏱️ 07:00</span></h2><ul><li>基于CAS(Compare and Swap)实现状态原子操作，使用Unsafe类直接操作内存</li><li>线程等待队列采用双向链表结构，每个节点包含线程引用和前驱/后继指针</li><li>通过park/unpark方法实现线程挂起与唤醒，底层依赖JVM的LockSupport类</li></ul><div class="note">🔎 <b>考点/易混点：</b>注意AQS的自旋等待机制：线程在获取锁失败后会进行多次CAS尝试，而非直接阻塞</div><div class="deep">🔍 <b>底层原理 / 延伸：</b>将线程等待队列比作餐厅的叫号系统。顾客(线程)取号后，服务员(线程调度器)按顺序叫号。若当前号(状态)被占用，顾客就等待，这对应AQS的FIFO队列机制。</div><div class="code-desc">📝 <b>代码说明：</b>CAS操作示例，使用Unsafe类更新state状态</div><pre class="code"><code data-lang="java">private final boolean compareAndSetState(int expect, int update) {
+    return unsafe.compareAndSwapInt(this, stateOffset, expect, update);
+}</code></pre><img class="shot" loading="lazy" src="截图/frame_000008.jpg" data-ts="07:00" alt="AQS底层实现原理"></div><div class="sec" id="sec4"><h2>4. AQS在并发工具中的应用 <span class="ts" data-ts="08:00">⏱️ 08:00</span></h2><ul><li>ReentrantLock通过继承AQS实现可重入锁功能，维护锁计数器和持有线程标识</li><li>Semaphore通过AQS实现资源许可管理，共享模式下允许指定数量的线程同时访问</li><li>CountDownLatch通过AQS实现线程等待/通知机制，基于状态值的递减操作</li></ul><div class="note">🔎 <b>考点/易混点：</b>注意不同并发工具的实现差异：ReentrantLock支持公平/非公平锁，Semaphore支持资源池，CountDownLatch是一次性触发</div><div class="deep">🔍 <b>底层原理 / 延伸：</b>将CountDownLatch类比为考试倒计时。当倒计时归零时，所有等待的考生(线程)同时获得考试资格，这种一次性触发机制对应AQS的条件队列设计。</div><div class="code-desc">📝 <b>代码说明：</b>CountDownLatch的await方法实现，通过AQS等待状态值</div><pre class="code"><code data-lang="java">public void await() throws InterruptedException {
+    sync.acquireSharedInterruptibly(1);
+}</code></pre><img class="shot" loading="lazy" src="截图/frame_000010.jpg" data-ts="08:00" alt="AQS在并发工具中的应用"></div><h2 class="blk">📊 知识小结</h2><table class="kt"><thead><tr><th>知识点</th><th>核心内容</th><th>考点/易混点</th><th>难度</th></tr></thead><tbody><tr><td>AQS定义</td><td>Java并发包核心同步框架，通过FIFO队列和状态管理实现线程协调</td><td>区分AQS与synchronized关键字的区别</td><td class="lv">★★★★</td></tr><tr><td>工作模式</td><td>支持排他模式(独占)和共享模式，分别对应互斥锁和资源池</td><td>理解两种模式的兼容性限制</td><td class="lv">★★★</td></tr><tr><td>底层机制</td><td>基于CAS原子操作和LockSupport实现线程挂起/唤醒，使用双向链表管理等待队列</td><td>掌握park/unpark与线程状态转换关系</td><td class="lv">★★★★★</td></tr><tr><td>应用场景</td><td>ReentrantLock、Semaphore、CountDownLatch等并发工具的底层实现基础</td><td>区分不同并发工具的AQS实现差异</td><td class="lv">★★★</td></tr></tbody></table><h2 class="blk">❓ 自测题</h2><div class="quiz"><p class="q">Q：AQS框架的核心组成部分不包括以下哪个选项？</p><p class="a">A：A. 状态机 B. 等待队列 C. 线程池 D. CAS操作
+答案：C</p></div><div class="quiz"><p class="q">Q：在AQS中，共享模式与排他模式的主要区别是什么？</p><p class="a">A：A. 共享模式允许线程同时访问资源
+B. 排他模式支持锁重入
+C. 共享模式使用不同的状态管理策略
+D. 以上都是
+答案：D</p></div><div class="quiz"><p class="q">Q：下列哪种并发工具的实现不依赖AQS？</p><p class="a">A：A. ReentrantLock B. CyclicBarrier C. Semaphore D. CountDownLatch
+答案：B</p></div></div><script>
+document.querySelectorAll('[data-ts]').forEach(function(e){
+  var s=e.getAttribute('data-ts'); if(!s) return;
+  e.onclick=function(){
+    var p=s.split(':').map(Number);
+    var t = p.length>2 ? (p[0]*3600+p[1]*60+p[2]) : (p[0]*60+(p[1]||0));
+    var v=document.getElementById('v'); v.currentTime=t; v.play();
+  };
+});
+document.querySelectorAll('.toc a').forEach(function(a){
+  a.onclick=function(ev){ev.preventDefault();
+    var el=document.querySelector(a.getAttribute('href'));
+    if(el) el.scrollIntoView({behavior:'smooth',block:'start'});
+  };
+});
+</script></body></html>

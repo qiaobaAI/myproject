@@ -1,0 +1,22 @@
+# 统一行尾，避免 Windows/Mac/Linux 协作踩坑
+# 说明：仓库内统一以 LF 存储，checkout 时按下列规则还原
+
+# 默认：Git 自动判定文本并按平台归一化
+* text=auto
+
+# Windows 批处理：必须 CRLF（GBK 编码，cmd 才不报乱码）
+*.bat text eol=crlf
+
+# Shell / Python / 文档：必须 LF（run.sh 是 Unix 脚本，CRLF 会直接废掉）
+*.sh text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+
+# 本文件自身也锁 LF，消除 checkout 时的 CRLF 警告
+*.gitattributes text eol=lf
+
+# 图片：二进制，禁止任何行尾/文本归一化
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary

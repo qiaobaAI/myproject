@@ -1,0 +1,10 @@
+# 行尾锁定：bat 必须 CRLF，其余 LF
+* text=auto eol=lf
+*.bat text eol=crlf
+*.sh text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.gitattributes text eol=lf
+*.png binary
+*.jpg binary
+*.jpeg binary

@@ -1,0 +1,18 @@
+# ===== 体积大 / 可自动重建，禁止入库 =====
+.venv/
+__pycache__/
+tools/                 # ffmpeg 二进制(400MB+)，改由 README 指引下载
+models/                # whisper 模型(200MB+)。⚠️ 克隆后此目录为空，需按 README 步骤3 用 huggingface-cli 走镜像下放
+output/                # 用户自己生成的笔记，含私有视频截图
+sample/                # 本地测试产物
+test_full/             # 本地测试产物
+
+# ===== 运行日志 / 临时文件 =====
+*.log
+run_*.log
+nul                   # 杂项的模型状态 JSON，非必需
+
+# ===== Python 通用 =====
+*.pyc
+__pycache__/
+.DS_Store
