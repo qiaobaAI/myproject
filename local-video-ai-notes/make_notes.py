@@ -741,6 +741,12 @@ def make_html(path, video_rel, title, intro, sections, summary_table, quiz,
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v",
               ".ts", ".mpeg", ".mpg", ".3gp", ".rmvb", ".mts", ".m2ts", ".vob"}
 
+# 批量安全阈值（仅用于提示/确认，不限制功能本身）
+# - 找到的视频数超过此值：提示先 --dry-run 预览清单，避免误抓软件自带视频/长时间空转
+DRYRUN_SUGGEST_THRESHOLD = 50
+# - 超过此值：强制要求 y/N 确认后才开始，防止手滑把整个大目录一次性跑光
+BATCH_CONFIRM_THRESHOLD = 300
+
 
 def find_videos(folder, recursive=True, exts=None):
     exts = {e.lower() if e.startswith(".") else "." + e.lower()
@@ -991,6 +997,8 @@ def main():
                     help="复用输出目录里已有的逐字稿.txt与截图, 跳过抽帧/转写(调提示词时快速重跑)")
     ap.add_argument("--ext", default=None, help="自定义视频后缀(逗号分隔), 如 mp4,mkv")
     ap.add_argument("--force", action="store_true", help="强制重跑(忽略已存在的笔记)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="仅扫描并列出将要处理的视频清单+数量，不调用 Whisper/LLM（大文件夹先用它预览，避免误抓/长时间运行）")
     ap.add_argument("--mirror-from", default=None,
                     help="镜像起点：输出目录只保留从该路径之后的层级(如 'D:\\videos\\java-course')；不传则镜像完整路径(去盘符)")
     ap.add_argument("--all-formats", action="store_true",
@@ -1031,6 +1039,14 @@ def main():
         base = os.path.splitext(os.path.basename(src))[0]
         dir_rel = mirror_rel(os.path.dirname(src), args.mirror_from)
         out = os.path.join(out_root, dir_rel, base + "_notes")
+        if args.dry_run:
+            sz = os.path.getsize(src)
+            print(f"[dry-run] 单文件模式")
+            print(f"  将处理: {src}")
+            print(f"  文件大小: {sz/1024/1024:.1f} MB")
+            print(f"  输出目录: {out}")
+            print(f"[dry-run] 未做任何处理，退出。")
+            return
         if dir_rel:
             print(f"[*] 镜像子路径: {dir_rel}")
         else:
@@ -1055,13 +1071,38 @@ def main():
         print("在文件夹中未找到视频文件:", src); sys.exit(1)
     print(f"[*] 在 {src} 找到 {len(videos)} 个视频（递归={not args.no_recursive}）")
 
+    # ---- 仅预览：列出清单后退出，不调用 Whisper/LLM ----
+    if args.dry_run:
+        print(f"\n[dry-run] 将处理以下 {len(videos)} 个视频（不调用 Whisper/LLM）：")
+        for i, v in enumerate(videos, 1):
+            print(f"  {i:4}. {v}")
+        print(f"\n[dry-run] 共 {len(videos)} 个视频，未做任何处理，退出。")
+        return
+
+    # ---- 安全提示：超过阈值才建议 --dry-run（小文件夹不打扰）----
+    if len(videos) > DRYRUN_SUGGEST_THRESHOLD:
+        print(f"\n⚠️ 找到 {len(videos)} 个视频，超过建议预览阈值({DRYRUN_SUGGEST_THRESHOLD})。")
+        print("   建议先加 --dry-run 预览清单，确认无误后再正式运行"
+              "（避免误抓软件自带视频/长时间空转）。")
+
+    # ---- 超大目录强制确认 ----
+    if len(videos) > BATCH_CONFIRM_THRESHOLD:
+        if sys.stdin.isatty():
+            ans = input(f"\n找到 {len(videos)} 个视频，确认要全部处理？(y/N) ").strip().lower()
+            if ans not in ("y", "yes", "是"):
+                print("已取消。"); sys.exit(0)
+        else:
+            print(f"\n⚠️ 非交互环境且视频数={len(videos)}>={BATCH_CONFIRM_THRESHOLD}，"
+                  f"为安全起见请显式加 --dry-run 或确认后再运行。")
+
     ok, fail = 0, []
     for i, v in enumerate(videos, 1):
         base = os.path.splitext(os.path.basename(v))[0]
         rel = os.path.dirname(os.path.relpath(v, src))
         # 最终输出 = 输出根 / 输入文件夹镜像子路径 / 内部相对路径 / 视频名_notes
         out = os.path.join(out_root, src_rel, rel, base + "_notes")
-        if not args.force and not args.reuse and os.path.exists(os.path.join(out, "笔记.md")):
+        # 跳过标记用 index.html（默认核心交付，任何模式都会生成）；--all-formats 也含它
+        if not args.force and not args.reuse and os.path.exists(os.path.join(out, "index.html")):
             print(f"\n[{i}/{len(videos)}] 跳过(已存在笔记): {v}")
             ok += 1
             continue

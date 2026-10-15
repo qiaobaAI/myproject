@@ -183,6 +183,7 @@ index.html        ← 核心交付，浏览器打开，左视频右笔记
 | `--mirror-from "D:\baiduyunpan"` | 输出目录从指定层级开始镜像（去掉同步盘前缀）。 |
 | `--all-formats` | 额外生成 笔记.md/docx/pptx/思维导图.mm。 |
 | `--no-llm` | 只做抽帧+转写，不调大模型（调试用）。 |
+| `--dry-run` | **大文件夹专用**：只扫描并列出将要处理的视频清单+数量，不调 Whisper/LLM。丢 200G 大目录前先跑它预览，确认没误抓软件自带视频。找到 >50 个视频会自动提示用本参数；>300 个会要求 y/N 确认。 |
 | `--device cuda` | 强制 Whisper 走 GPU（**新手别用**，见坑 1）。 |
 | `--llm-base / --llm-model` | 改大模型端点 / 模型名（接 ollama 等时用）。 |
 | `--vision-url / --vision-model` | 视觉 OCR 用独立端点（如另起 35B 于 8001）。 |
