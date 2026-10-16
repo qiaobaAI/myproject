@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>本地视频 → AI 富笔记 · 架构图与流程图</title>
+<style>
+  :root{
+    --bg:#f7f8fa; --card:#ffffff; --ink:#1f2329; --sub:#5b6470;
+    --line:#d0d7de; --accent:#2563eb; --accent2:#0e7490;
+    --warn:#b45309; --ok:#15803d; --pill:#eef2ff; --pill2:#ecfeff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:"Microsoft YaHei","PingFang SC","Segoe UI",system-ui,sans-serif;line-height:1.6}
+  .wrap{max-width:1040px;margin:0 auto;padding:32px 20px 64px}
+  h1{font-size:24px;margin:0 0 4px}
+  .lead{color:var(--sub);margin:0 0 28px;font-size:14px}
+  .sec{background:var(--card);border:1px solid var(--line);border-radius:14px;
+    padding:20px 22px;margin-bottom:26px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+  .sec h2{font-size:18px;margin:0 0 4px;display:flex;align-items:center;gap:8px}
+  .sec h2 .tag{font-size:12px;font-weight:600;color:#fff;background:var(--accent);
+    border-radius:999px;padding:2px 10px}
+  .sec .note{color:var(--sub);font-size:13px;margin:0 0 14px}
+  svg{width:100%;height:auto;display:block}
+  table{width:100%;border-collapse:collapse;font-size:13.5px;margin-top:6px}
+  th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+  th{background:#f1f5f9;color:var(--ink);font-weight:600}
+  td code{background:var(--pill);padding:1px 6px;border-radius:6px;font-size:12.5px}
+  .pill{display:inline-block;background:var(--pill);color:#3730a3;
+    border-radius:999px;padding:1px 9px;font-size:12px;margin:2px 2px 0 0}
+  .pill2{background:var(--pill2);color:#155e75}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:720px){.grid{grid-template-columns:1fr}}
+  .legend{font-size:12px;color:var(--sub);margin-top:8px}
+  .legend b{color:var(--ink)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>本地视频 → AI 富笔记 · 系统图解</h1>
+  <p class="lead">项目 <code>local-video-ai-notes</code> 的组件架构与运行流程。全部在本地运行，无需联网、不依赖任何云服务。</p>
+
+  <!-- ============ 架构图 ============ -->
+  <div class="sec">
+    <h2><span class="tag">架构</span> 组件架构图</h2>
+    <p class="note">四层结构：入口层 → 调度层 → 处理管道（核心）→ 产物层；右侧为本地依赖的引擎（ffmpeg / faster-whisper / llama-server）。</p>
+    <svg viewBox="0 0 1000 660" role="img" aria-label="组件架构图">
+      <defs>
+        <marker id="ar" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+          <path d="M0,0 L8,3 L0,6 Z" fill="#475569"/>
+        </marker>
+        <marker id="ard" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+          <path d="M0,0 L8,3 L0,6 Z" fill="#0e7490"/>
+        </marker>
+      </defs>
+
+      <!-- 层容器 -->
+      <rect x="24" y="48"  width="700" height="96"  rx="12" fill="#f8fafc" stroke="#cbd5e1"/>
+      <rect x="24" y="160" width="700" height="86"  rx="12" fill="#f8fafc" stroke="#cbd5e1"/>
+      <rect x="24" y="262" width="700" height="170" rx="12" fill="#f8fafc" stroke="#cbd5e1"/>
+      <rect x="24" y="450" width="700" height="120" rx="12" fill="#f8fafc" stroke="#cbd5e1"/>
+      <rect x="748" y="48" width="224" height="522" rx="12" fill="#fffbeb" stroke="#fcd34d"/>
+
+      <!-- 层标题 -->
+      <text x="36" y="66" font-size="13" font-weight="700" fill="#334155">① 入口层</text>
+      <text x="36" y="178" font-size="13" font-weight="700" fill="#334155">② 调度层（CLI）</text>
+      <text x="36" y="280" font-size="13" font-weight="700" fill="#334155">③ 处理管道 <tspan font-weight="400" fill="#64748b">process_one()</tspan></text>
+      <text x="36" y="468" font-size="13" font-weight="700" fill="#334155">④ 产物层</text>
+      <text x="760" y="66" font-size="13" font-weight="700" fill="#92400e">⚙ 本地依赖引擎</text>
+
+      <!-- L1: 输入 & 启动器 -->
+      <rect x="44" y="74" width="190" height="56" rx="9" fill="#fff" stroke="#94a3b8"/>
+      <text x="139" y="98" font-size="12.5" font-weight="600" text-anchor="middle" fill="#0f172a">📁 视频 / 文件夹</text>
+      <text x="139" y="116" font-size="10.5" text-anchor="middle" fill="#64748b">单文件 或 目录批量</text>
+
+      <rect x="404" y="74" width="300" height="56" rx="9" fill="#fff" stroke="#94a3b8"/>
+      <text x="554" y="96" font-size="12.5" font-weight="600" text-anchor="middle" fill="#0f172a">run.bat / run.sh（启动器）</text>
+      <text x="554" y="114" font-size="10.5" text-anchor="middle" fill="#64748b">拖拽/粘贴路径 · 去引号 · 启动 Python</text>
+
+      <!-- L2: 调度 -->
+      <rect x="44" y="186" width="320" height="44" rx="9" fill="#fff" stroke="#94a3b8"/>
+      <text x="58" y="204" font-size="11.5" fill="#0f172a"><tspan font-weight="700">main()</tspan> 参数解析 · 路径清洗 · 输出镜像</text>
+      <text x="58" y="221" font-size="10" fill="#64748b">clean_input_path / mirror_rel</text>
+
+      <rect x="404" y="186" width="300" height="44" rx="9" fill="#fff" stroke="#94a3b8"/>
+      <text x="418" y="204" font-size="11.5" fill="#0f172a"><tspan font-weight="700">find_videos()</tspan> 按扩展名递归扫描过滤</text>
+      <text x="418" y="221" font-size="10" fill="#64748b">非视频(.py/.docx/.exe)自动忽略</text>
+
+      <!-- L3: 处理管道 6 节点 -->
+      <g font-size="11" text-anchor="middle">
+        <rect x="44"  y="300" width="100" height="58" rx="9" fill="#eff6ff" stroke="#60a5fa"/>
+        <text x="94"  y="322" font-weight="700" fill="#1e3a8a">抽帧</text>
+        <text x="94"  y="340" fill="#1e40af">extract_frames</text>
+        <text x="94"  y="353" font-size="9.5" fill="#3730a3">ffmpeg</text>
+
+        <rect x="160" y="300" width="100" height="58" rx="9" fill="#eff6ff" stroke="#60a5fa"/>
+        <text x="210" y="322" font-weight="700" fill="#1e3a8a">转写</text>
+        <text x="210" y="340" fill="#1e40af">transcribe</text>
+        <text x="210" y="353" font-size="9.5" fill="#3730a3">faster-whisper</text>
+
+        <rect x="276" y="300" width="108" height="58" rx="9" fill="#ecfeff" stroke="#22d3ee"/>
+        <text x="330" y="320" font-weight="700" fill="#155e75">视觉OCR</text>
+        <text x="330" y="336" fill="#0e7490">vision_ocr</text>
+        <text x="330" y="350" font-size="9" fill="#155e75">仅无声/--vision</text>
+
+        <rect x="400" y="300" width="100" height="58" rx="9" fill="#eff6ff" stroke="#60a5fa"/>
+        <text x="450" y="322" font-weight="700" fill="#1e3a8a">总结</text>
+        <text x="450" y="340" fill="#1e40af">llm_summary</text>
+        <text x="450" y="353" font-size="9.5" fill="#3730a3">llama :8000</text>
+
+        <rect x="516" y="300" width="96" height="58" rx="9" fill="#eff6ff" stroke="#60a5fa"/>
+        <text x="564" y="322" font-weight="700" fill="#1e3a8a">导图</text>
+        <text x="564" y="340" fill="#1e40af">llm_mindmap</text>
+        <text x="564" y="353" font-size="9.5" fill="#3730a3">llama :8000</text>
+
+        <rect x="628" y="300" width="86" height="58" rx="9" fill="#ecfdf5" stroke="#34d399"/>
+        <text x="671" y="322" font-weight="700" fill="#065f46">组装</text>
+        <text x="671" y="340" fill="#047857">make_html</text>
+        <text x="671" y="353" font-size="9.5" fill="#065f46">核心</text>
+      </g>
+
+      <!-- L4: 产物 -->
+      <rect x="44" y="478" width="170" height="72" rx="9" fill="#fff" stroke="#34d399"/>
+      <text x="129" y="500" font-size="12" font-weight="700" text-anchor="middle" fill="#065f46">index.html ★核心</text>
+      <text x="129" y="518" font-size="9.5" text-anchor="middle" fill="#047857">左视频+右图文</text>
+      <text x="129" y="532" font-size="9.5" text-anchor="middle" fill="#047857">类比/代码框/截图</text>
+
+      <rect x="228" y="478" width="120" height="72" rx="9" fill="#fff" stroke="#94a3b8"/>
+      <text x="288" y="508" font-size="11.5" font-weight="600" text-anchor="middle" fill="#0f172a">逐字稿.txt</text>
+      <text x="288" y="526" font-size="9.5" text-anchor="middle" fill="#64748b">Whisper 转写</text>
+
+      <rect x="362" y="478" width="92" height="72" rx="9" fill="#fff" stroke="#94a3b8"/>
+      <text x="408" y="508" font-size="11.5" font-weight="600" text-anchor="middle" fill="#0f172a">截图/</text>
+      <text x="408" y="526" font-size="9.5" text-anchor="middle" fill="#64748b">关键帧 jpg</text>
+
+      <rect x="468" y="478" width="240" height="72" rx="9" fill="#fff" stroke="#94a3b8" stroke-dasharray="5 4"/>
+      <text x="588" y="506" font-size="11" font-weight="600" text-anchor="middle" fill="#0f172a">--all-formats 才生成</text>
+      <text x="588" y="524" font-size="9.5" text-anchor="middle" fill="#64748b">笔记.md / .docx / .pptx / 思维导图.mm</text>
+      <text x="588" y="540" font-size="9" text-anchor="middle" fill="#94a3b8">（默认不出，HTML 已满足）</text>
+
+      <!-- 右侧外部引擎 -->
+      <g font-size="11">
+        <rect x="762" y="86"  width="196" height="50" rx="9" fill="#fff" stroke="#f59e0b"/>
+        <text x="860" y="106" font-weight="700" text-anchor="middle" fill="#92400e">ffmpeg</text>
+        <text x="860" y="124" font-size="9.5" text-anchor="middle" fill="#b45309">抽关键帧 · 本地二进制</text>
+
+        <rect x="762" y="170" width="196" height="50" rx="9" fill="#fff" stroke="#f59e0b"/>
+        <text x="860" y="190" font-weight="700" text-anchor="middle" fill="#92400e">faster-whisper</text>
+        <text x="860" y="208" font-size="9.5" text-anchor="middle" fill="#b45309">语音→文字 · 默认 CPU</text>
+
+        <rect x="762" y="300" width="196" height="92" rx="9" fill="#fff" stroke="#f59e0b"/>
+        <text x="860" y="322" font-weight="700" text-anchor="middle" fill="#92400e">llama-server :8000</text>
+        <text x="860" y="340" font-size="10" text-anchor="middle" fill="#b45309">30B 笔记(纯文本)</text>
+        <text x="860" y="356" font-size="10" text-anchor="middle" fill="#b45309">35B 视觉(多模态)</text>
+        <text x="860" y="374" font-size="9" text-anchor="middle" fill="#b45309">可双 server：8001 专跑 OCR</text>
+      </g>
+
+      <!-- 主箭头 -->
+      <line x1="139" y1="130" x2="554" y2="130" stroke="#475569" stroke-width="1.6" marker-end="url(#ar)"/>
+      <line x1="554" y1="130" x2="554" y2="186" stroke="#475569" stroke-width="1.6" marker-end="url(#ar)"/>
+      <line x1="204" y1="230" x2="204" y2="300" stroke="#475569" stroke-width="1.6" marker-end="url(#ar)"/>
+      <!-- 管道内部 -->
+      <line x1="144" y1="329" x2="158" y2="329" stroke="#475569" stroke-width="1.4" marker-end="url(#ar)"/>
+      <line x1="260" y1="329" x2="274" y2="329" stroke="#475569" stroke-width="1.4" marker-end="url(#ar)"/>
+      <line x1="384" y1="329" x2="398" y2="329" stroke="#475569" stroke-width="1.4" marker-end="url(#ar)"/>
+      <line x1="500" y1="329" x2="514" y2="329" stroke="#475569" stroke-width="1.4" marker-end="url(#ar)"/>
+      <line x1="612" y1="329" x2="626" y2="329" stroke="#475569" stroke-width="1.4" marker-end="url(#ar)"/>
+      <!-- 组装 → 产物 -->
+      <line x1="671" y1="358" x2="204" y2="478" stroke="#475569" stroke-width="1.6" marker-end="url(#ar)"/>
+
+      <!-- 外部依赖 虚线 -->
+      <line x1="762" y1="111" x2="144" y2="329" stroke="#0e7490" stroke-width="1.3" stroke-dasharray="5 4" marker-end="url(#ard)"/>
+      <line x1="762" y1="195" x2="210" y2="329" stroke="#0e7490" stroke-width="1.3" stroke-dasharray="5 4" marker-end="url(#ard)"/>
+      <line x1="762" y1="346" x2="450" y2="329" stroke="#0e7490" stroke-width="1.3" stroke-dasharray="5 4" marker-end="url(#ard)"/>
+      <line x1="762" y1="346" x2="564" y2="329" stroke="#0e7490" stroke-width="1.3" stroke-dasharray="5 4" marker-end="url(#ard)"/>
+      <line x1="762" y1="330" x2="330" y2="329" stroke="#0e7490" stroke-width="1.3" stroke-dasharray="5 4" marker-end="url(#ard)"/>
+    </svg>
+    <p class="legend"><b>实线</b>=主数据流 ｜ <b>蓝色虚线</b>=本地引擎调用 ｜ <b>青色框</b>=条件触发（无声/纯录屏/纯PPT视频）｜ <b>绿色框</b>=核心产物</p>
+  </div>
+
+  <!-- ============ 各组件功能说明 ============ -->
+  <div class="sec">
+    <h2><span class="tag" style="background:#0e7490">功能</span> 各组件职责速查</h2>
+    <table>
+      <thead><tr><th style="width:150px">组件</th><th>职责</th><th style="width:230px">关键函数 / 备注</th></tr></thead>
+      <tbody>
+        <tr><td><b>run.bat / run.sh</b></td><td>用户入口。接收拖入的视频路径，去除首尾引号与 <code>file://</code> 前缀，调用 Python 主程序。Windows 必须 GBK+CRLF，Linux/macOS 必须 LF。</td><td><span class="pill">启动器</span></td></tr>
+        <tr><td><b>main()</b></td><td>参数解析、路径清洗、计算输出目录（镜像输入路径，去盘符或按 <code>--mirror-from</code> 裁剪）、单文件/文件夹分流、<code>--dry-run</code> 预览、安全阈值提示（&gt;50 建议预览 / &gt;300 强制确认）。</td><td><code>clean_input_path</code><br><code>mirror_rel</code></td></tr>
+        <tr><td><b>find_videos()</b></td><td>文件夹模式下按视频扩展名递归扫描，自动忽略代码/文档/安装包等非视频文件。</td><td><code>VIDEO_EXTS</code><br><code>--no-recursive</code></td></tr>
+        <tr><td><b>get_meta + extract_frames</b></td><td>用 ffmpeg 取视频时长/分辨率，并按固定间隔抽取关键帧存到 <code>截图/</code>。</td><td><code>--frame-interval</code></td></tr>
+        <tr><td><b>transcribe</b></td><td>faster-whisper 本地语音转文字（<b>默认走 CPU</b>，因本机 CUDA13 缺 cublas64_12）。产出 <code>逐字稿.txt</code>。</td><td><code>--device cuda</code> 仅 CUDA12 有效<br><code>--reuse</code> 可跳过</td></tr>
+        <tr><td><b>vision_ocr</b></td><td><b>条件触发</b>：转写稿为空/极短 或 <code>--vision</code> 强制。让 35B 视觉模型「看」关键帧，OCR 出屏幕代码/PPT/文字，缓存 <code>画面识别.txt</code>。让无声视频也能出笔记。</td><td><code>call_vision</code><br><code>--vision-url</code></td></tr>
+        <tr><td><b>llm_summary</b></td><td>把转写稿（超长则分块）+ 截图清单 + 视觉上下文发给 llama-server，结构化产出 sections / quiz / summary_table / deepdive（类比）/ code（代码说明）。</td><td>端点 <code>localhost:8000</code><br><code>--max-tokens</code></td></tr>
+        <tr><td><b>llm_mindmap</b></td><td>基于章节大纲让模型生成思维导图文本（FreeMind 格式）。</td><td><code>make_mindmap_mm</code></td></tr>
+        <tr><td><b>make_html（★核心）</b></td><td>始终生成。左栏视频/首帧、右栏图文笔记（导读→目录→要点→考点→生活类比→代码框→内嵌截图）。</td><td><code>index.html</code></td></tr>
+        <tr><td><b>make_markdown / docx / pptx / mindmap_mm</b></td><td>仅 <code>--all-formats</code> 时额外生成四种格式；被 Office 占用时自动另存 <code>_new</code> 不丢文件。</td><td><span class="pill pill2">可选</span></td></tr>
+        <tr><td><b>外部引擎</b></td><td>ffmpeg（抽帧）、faster-whisper（转写）、llama-server（30B 笔记 / 35B 视觉，可双 server 分流 OCR）。</td><td>见 <code>docs/llama-setup.md</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ============ 流程图 ============ -->
+  <div class="sec">
+    <h2><span class="tag" style="background:#15803d">流程</span> 运行流程图（单视频）</h2>
+    <p class="note">从拖入视频到产出 <code>index.html</code> 的完整链路；含 <code>--dry-run</code> 与「无声视频视觉OCR」两个分支。</p>
+    <svg viewBox="0 0 760 1180" role="img" aria-label="运行流程图">
+      <defs>
+        <marker id="b" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+          <path d="M0,0 L8,3 L0,6 Z" fill="#475569"/>
+        </marker>
+      </defs>
+
+      <!-- 1 -->
+      <rect x="180" y="36" width="400" height="56" rx="10" fill="#eff6ff" stroke="#60a5fa"/>
+      <text x="380" y="60" font-size="13" font-weight="700" text-anchor="middle" fill="#1e3a8a">① 拖视频到 run.bat（或 run.sh）</text>
+      <text x="380" y="80" font-size="10.5" text-anchor="middle" fill="#3730a3">单个文件 或 整个文件夹</text>
+
+      <!-- 2 -->
+      <rect x="180" y="120" width="400" height="50" rx="10" fill="#fff" stroke="#94a3b8"/>
+      <text x="380" y="150" font-size="12.5" text-anchor="middle" fill="#0f172a">② clean_input_path：去掉引号 / <tspan font-family="monospace">file://</tspan> 前缀</text>
+
+      <!-- 3 判断 -->
+      <rect x="280" y="200" width="200" height="56" rx="10" fill="#fef3c7" stroke="#f59e0b"/>
+      <text x="380" y="224" font-size="12.5" font-weight="700" text-anchor="middle" fill="#92400e">③ 单文件 or 文件夹？</text>
+      <text x="380" y="244" font-size="10" text-anchor="middle" fill="#b45309">main() 分流</text>
+
+      <!-- 3a 文件夹 -->
+      <rect x="40" y="296" width="280" height="64" rx="10" fill="#fff" stroke="#94a3b8"/>
+      <text x="180" y="318" font-size="11.5" text-anchor="middle" fill="#0f172a">③a 文件夹 → find_videos()</text>
+      <text x="180" y="335" font-size="9.5" text-anchor="middle" fill="#64748b">按扩展名递归扫描</text>
+      <text x="180" y="350" font-size="9.5" text-anchor="middle" fill="#64748b">&gt;50提示dry-run / &gt;300确认</text>
+
+      <!-- 3b 单文件 -->
+      <rect x="440" y="296" width="240" height="64" rx="10" fill="#fff" stroke="#94a3b8"/>
+      <text x="560" y="320" font-size="11.5" text-anchor="middle" fill="#0f172a">③b 单文件 → 直接进入</text>
+      <text x="560" y="338" font-size="9.5" text-anchor="middle" fill="#64748b">镜像父目录作为输出路径</text>
+
+      <!-- 4 dry-run -->
+      <rect x="180" y="392" width="400" height="50" rx="10" fill="#fff" stroke="#22d3ee"/>
+      <text x="380" y="421" font-size="12" text-anchor="middle" fill="#0e7490">④ 是否 --dry-run？→ 列出清单后退出（不调模型）</text>
+
+      <!-- 5 镜像目录 -->
+      <rect x="180" y="472" width="400" height="48" rx="10" fill="#fff" stroke="#94a3b8"/>
+      <text x="380" y="501" font-size="12" text-anchor="middle" fill="#0f172a">⑤ mirror_rel 计算输出目录（去盘符 / --mirror-from 裁剪）</text>
+
+      <!-- 6 抽帧 -->
+      <rect x="180" y="548" width="400" height="48" rx="10" fill="#eff6ff" stroke="#60a5fa"/>
+      <text x="380" y="577" font-size="12" text-anchor="middle" fill="#1e3a8a">⑥ ffmpeg 抽关键帧 + get_meta 取时长/分辨率</text>
+
+      <!-- 7 转写 -->
+      <rect x="180" y="624" width="400" height="48" rx="10" fill="#eff6ff" stroke="#60a5fa"/>
+      <text x="380" y="653" font-size="12" text-anchor="middle" fill="#1e3a8a">⑦ faster-whisper 本地转写（默认 CPU）→ 逐字稿.txt</text>
+
+      <!-- 8 判断 silent -->
+      <rect x="180" y="700" width="400" height="56" rx="10" fill="#fef3c7" stroke="#f59e0b"/>
+      <text x="380" y="724" font-size="12" font-weight="700" text-anchor="middle" fill="#92400e">⑧ 转写为空/极短 or --vision？</text>
+      <text x="380" y="744" font-size="9.5" text-anchor="middle" fill="#b45309">无声 / 纯录屏 / 纯PPT 视频命中</text>
+
+      <!-- 8a vision -->
+      <rect x="40" y="788" width="320" height="64" rx="10" fill="#ecfeff" stroke="#22d3ee"/>
+      <text x="200" y="810" font-size="11.5" text-anchor="middle" fill="#155e75">⑧a 是 → vision_ocr（35B 看帧）</text>
+      <text x="200" y="827" font-size="9.5" text-anchor="middle" fill="#0e7490">OCR 文字/代码 → 画面识别.txt</text>
+      <text x="200" y="843" font-size="9" text-anchor="middle" fill="#0e7490">缓存供 --reuse</text>
+
+      <!-- 8b 跳过 -->
+      <rect x="440" y="800" width="240" height="40" rx="10" fill="#fff" stroke="#94a3b8"/>
+      <text x="560" y="825" font-size="11" text-anchor="middle" fill="#0f172a">⑧b 否 → 跳过 OCR</text>
+
+      <!-- 9 总结 -->
+      <rect x="180" y="888" width="400" height="52" rx="10" fill="#eff6ff" stroke="#60a5fa"/>
+      <text x="380" y="912" font-size="12" text-anchor="middle" fill="#1e3a8a">⑨ llm_summary（llama :8000，超长分块）</text>
+      <text x="380" y="930" font-size="9.5" text-anchor="middle" fill="#3730a3">sections / quiz / 小结表 / deepdive / code</text>
+
+      <!-- 10 导图 -->
+      <rect x="180" y="964" width="400" height="44" rx="10" fill="#eff6ff" stroke="#60a5fa"/>
+      <text x="380" y="991" font-size="12" text-anchor="middle" fill="#1e3a8a">⑩ llm_mindmap 生成思维导图文本</text>
+
+      <!-- 11 html -->
+      <rect x="180" y="1032" width="400" height="50" rx="10" fill="#ecfdf5" stroke="#34d399"/>
+      <text x="380" y="1058" font-size="12.5" font-weight="700" text-anchor="middle" fill="#065f46">⑪ make_html → index.html（★核心交付）</text>
+      <text x="380" y="1075" font-size="9.5" text-anchor="middle" fill="#047857">左视频+右图文 · 内嵌截图/类比/代码框</text>
+
+      <!-- 12 all-formats -->
+      <rect x="180" y="1100" width="400" height="44" rx="10" fill="#fff" stroke="#94a3b8" stroke-dasharray="5 4"/>
+      <text x="380" y="1127" font-size="11.5" text-anchor="middle" fill="#0f172a">⑫ [--all-formats] 额外生成 md/docx/pptx/mm</text>
+
+      <!-- 箭头 -->
+      <line x1="380" y1="92" x2="380" y2="120" stroke="#475569" stroke-width="1.6" marker-end="url(#b)"/>
+      <line x1="380" y1="170" x2="380" y2="200" stroke="#475569" stroke-width="1.6" marker-end="url(#b)"/>
+      <line x1="330" y1="256" x2="180" y2="296" stroke="#475569" stroke-width="1.5" marker-end="url(#b)"/>
+      <line x1="430" y1="256" x2="560" y2="296" stroke="#475569" stroke-width="1.5" marker-end="url(#b)"/>
+      <line x1="180" y1="360" x2="380" y2="392" stroke="#475569" stroke-width="1.5" marker-end="url(#b)"/>
+      <line x1="560" y1="360" x2="420" y2="392" stroke="#475569" stroke-width="1.5" marker-end="url(#b)"/>
+      <line x1="380" y1="442" x2="380" y2="472" stroke="#475569" stroke-width="1.6" marker-end="url(#b)"/>
+      <line x1="380" y1="520" x2="380" y2="548" stroke="#475569" stroke-width="1.6" marker-end="url(#b)"/>
+      <line x1="380" y1="596" x2="380" y2="624" stroke="#475569" stroke-width="1.6" marker-end="url(#b)"/>
+      <line x1="380" y1="672" x2="380" y2="700" stroke="#475569" stroke-width="1.6" marker-end="url(#b)"/>
+      <line x1="200" y1="756" x2="200" y2="788" stroke="#0e7490" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#b)"/>
+      <line x1="560" y1="740" x2="560" y2="800" stroke="#475569" stroke-width="1.4" marker-end="url(#b)"/>
+      <line x1="200" y1="852" x2="380" y2="888" stroke="#0e7490" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#b)"/>
+      <line x1="560" y1="840" x2="420" y2="888" stroke="#475569" stroke-width="1.4" marker-end="url(#b)"/>
+      <line x1="380" y1="940" x2="380" y2="964" stroke="#475569" stroke-width="1.6" marker-end="url(#b)"/>
+      <line x1="380" y1="1008" x2="380" y2="1032" stroke="#475569" stroke-width="1.6" marker-end="url(#b)"/>
+      <line x1="380" y1="1082" x2="380" y2="1100" stroke="#475569" stroke-width="1.6" marker-end="url(#b)"/>
+
+      <!-- 降级说明 -->
+      <text x="620" y="118" font-size="10" fill="#94a3b8">备注：若 llama-server 不可用，</text>
+      <text x="620" y="134" font-size="10" fill="#94a3b8">⑨⑩ 跳过，输出「降级版」</text>
+      <text x="620" y="150" font-size="10" fill="#94a3b8">（纯转写+截图）。</text>
+    </svg>
+    <p class="legend"><b>黄色菱形</b>=分支判断 ｜ <b>青色虚线</b>=视觉OCR 条件路径（无声视频专用）｜ <b>绿色块</b>=核心产物 <code>index.html</code></p>
+  </div>
+
+  <div class="sec">
+    <h2><span class="tag" style="background:#5b6470">提示</span> 两个关键设计</h2>
+    <div class="grid">
+      <div>
+        <p style="margin:6px 0"><b>① 大文件夹安全机制</b></p>
+        <p style="margin:0;font-size:13px;color:var(--sub)">直接拖 200G 目录会递归扫描全部视频。<code>--dry-run</code> 只列清单不调模型；找到 &gt;50 个视频会提示先用它预览，&gt;300 个在非交互环境强制确认，防止误抓软件自带视频或长时间空转。中断后重跑会跳过已生成的 <code>index.html</code>（断点续跑）。</p>
+      </div>
+      <div>
+        <p style="margin:6px 0"><b>② 无声视频也能出笔记</b></p>
+        <p style="margin:0;font-size:13px;color:var(--sub)">当 Whisper 转写稿为空/极短（纯录屏、纯PPT、无声讲座），自动触发 <code>vision_ocr</code>：让 35B 视觉模型「看」关键帧，OCR 出屏幕上的代码/PPT/文字，喂给总结环节。需先在 <code>启动大模型.bat</code> 选模型1（35B 视觉）。</p>
+      </div>
+    </div>
+  </div>
+
+  <p style="text-align:center;color:#94a3b8;font-size:12px;margin-top:8px">本图由项目维护脚本生成 · 与 <code>make_notes.py</code> 实际逻辑保持一致</p>
+</div>
+</body>
+</html>
