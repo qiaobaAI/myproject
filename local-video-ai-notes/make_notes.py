@@ -979,9 +979,25 @@ class _Tee:
             pass
 
 
+def read_queue(path):
+    """读取队列文件：每行一个视频/文件夹路径，# 开头注释，空行忽略。返回路径列表。"""
+    paths = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                s = line.strip()
+                if not s or s.startswith("#"):
+                    continue
+                paths.append(s)
+    except Exception as e:
+        print(f"[!] 读取队列文件失败: {path} -> {e}")
+    return paths
+
+
 def main():
-    ap = argparse.ArgumentParser(description="本地视频 -> AI 富笔记（支持文件夹批量）")
-    ap.add_argument("video", help="单个视频文件 或 视频所在文件夹")
+    ap = argparse.ArgumentParser(description="本地视频 -> AI 富笔记（支持文件夹批量 / 队列）")
+    ap.add_argument("video", nargs="*", help="单个视频/文件夹（可多个，空格分隔）；或用 --queue 指定路径列表文件")
+    ap.add_argument("--queue", default=None, help="路径列表文件：每行一个视频/文件夹路径，# 开头为注释，空行忽略")
     ap.add_argument("--out", default=None, help="输出目录（文件夹模式时作为根目录，保留子目录结构）")
     ap.add_argument("--whisper-model", default=WHISPER_MODEL_DEFAULT)
     ap.add_argument("--device", default="cpu", help="whisper 转写设备: cpu / cuda。默认 cpu 最稳；若你的系统装了 CUDA 12(toolkit v12.x) 可改 cuda 加速")
@@ -1025,98 +1041,116 @@ def main():
     except Exception as e:
         print(f"[警告] 日志文件创建失败(仅影响记录, 不影响运行): {e}")
 
-    args.video = clean_input_path(args.video)
-    src = os.path.abspath(args.video)
-    if not os.path.exists(src):
-        print("文件/文件夹不存在:", src); sys.exit(1)
+    # ===== 构建任务清单：支持「多个路径」与「--queue 列表文件」=====
+    raw_paths = list(args.video)
+    if args.queue:
+        raw_paths += read_queue(args.queue)
+    if not raw_paths:
+        print("未提供任何视频/文件夹路径。把视频/文件夹拖到 run.bat，或用 --queue 指定路径列表文件。")
+        sys.exit(1)
 
-    # ---- 输出目录：镜像输入路径（去盘符 / 或 --mirror-from 指定起点）----
-    src_rel = mirror_rel(src, args.mirror_from)
-    print(f"[*] 输出根目录: {out_root}")
+    tasks = []  # (绝对路径, 是否文件)
+    for p in raw_paths:
+        p = clean_input_path(p)
+        ap = os.path.abspath(p)
+        if not os.path.exists(ap):
+            print(f"[!] 路径不存在，跳过: {ap}")
+            continue
+        tasks.append((ap, os.path.isfile(ap)))
+    if not tasks:
+        print("没有有效路径，退出。"); sys.exit(1)
 
-    # ---- 单文件模式：镜像视频所在父目录 ----
-    if os.path.isfile(src):
-        base = os.path.splitext(os.path.basename(src))[0]
-        dir_rel = mirror_rel(os.path.dirname(src), args.mirror_from)
-        out = os.path.join(out_root, dir_rel, base + "_notes")
-        if args.dry_run:
-            sz = os.path.getsize(src)
-            print(f"[dry-run] 单文件模式")
-            print(f"  将处理: {src}")
-            print(f"  文件大小: {sz/1024/1024:.1f} MB")
-            print(f"  输出目录: {out}")
-            print(f"[dry-run] 未做任何处理，退出。")
-            return
-        if dir_rel:
-            print(f"[*] 镜像子路径: {dir_rel}")
+    # ---- 展开成「视频 -> 输出目录」作业对，并记录镜像子路径 ----
+    task_specs = []  # (源路径, 是否文件, [(视频, 输出目录)...], 镜像子路径)
+    total_videos = 0
+    for (sp, is_file) in tasks:
+        if is_file:
+            base = os.path.splitext(os.path.basename(sp))[0]
+            dir_rel = mirror_rel(os.path.dirname(sp), args.mirror_from)
+            out = os.path.join(out_root, dir_rel, base + "_notes")
+            task_specs.append((sp, True, [(sp, out)], dir_rel))
+            total_videos += 1
         else:
-            print(f"[*] 镜像模式: 完整路径(去盘符)")
-        try:
-            process_one(src, out, args)
-        except Exception as e:
-            print("\n[!] 处理失败:", e); sys.exit(1)
-        return
+            vids = find_videos(sp, recursive=not args.no_recursive,
+                               exts=args.ext.split(",") if args.ext else None)
+            if not vids:
+                print(f"[!] 文件夹未找到视频，跳过: {sp}")
+                continue
+            srel = mirror_rel(sp, args.mirror_from)
+            job_pairs = []
+            for v in vids:
+                base = os.path.splitext(os.path.basename(v))[0]
+                rel = os.path.dirname(os.path.relpath(v, sp))
+                out = os.path.join(out_root, srel, rel, base + "_notes")
+                job_pairs.append((v, out))
+            task_specs.append((sp, False, job_pairs, srel))
+            total_videos += len(vids)
 
-    # ---- 文件夹批量模式：镜像输入文件夹本身 ----
-    src_rel = mirror_rel(src, args.mirror_from)
-    if src_rel:
-        print(f"[*] 镜像子路径: {src_rel}")
-    else:
-        print(f"[*] 镜像模式: 完整路径(去盘符)")
+    if not task_specs:
+        print("未展开出任何待处理视频，退出。"); sys.exit(1)
 
-    # ---- 文件夹批量模式 ----
-    videos = find_videos(src, recursive=not args.no_recursive,
-                         exts=args.ext.split(",") if args.ext else None)
-    if not videos:
-        print("在文件夹中未找到视频文件:", src); sys.exit(1)
-    print(f"[*] 在 {src} 找到 {len(videos)} 个视频（递归={not args.no_recursive}）")
+    print(f"[*] 输出根目录: {out_root}")
+    print(f"[*] 共 {len(task_specs)} 个路径，{total_videos} 个视频待处理")
 
     # ---- 仅预览：列出清单后退出，不调用 Whisper/LLM ----
     if args.dry_run:
-        print(f"\n[dry-run] 将处理以下 {len(videos)} 个视频（不调用 Whisper/LLM）：")
-        for i, v in enumerate(videos, 1):
-            print(f"  {i:4}. {v}")
-        print(f"\n[dry-run] 共 {len(videos)} 个视频，未做任何处理，退出。")
+        if len(task_specs) == 1 and task_specs[0][1]:
+            sp = task_specs[0][0]
+            sz = os.path.getsize(sp)
+            print(f"[dry-run] 单文件模式")
+            print(f"  将处理: {sp}")
+            print(f"  文件大小: {sz/1024/1024:.1f} MB")
+            print(f"  输出目录: {task_specs[0][2][0][1]}")
+        else:
+            print(f"\n[dry-run] 将处理以下 {len(task_specs)} 个路径、{total_videos} 个视频（不调用 Whisper/LLM）：")
+            for ti, (sp, is_file, jobs_, _) in enumerate(task_specs, 1):
+                tag = "文件" if is_file else f"文件夹({len(jobs_)} 视频)"
+                print(f"\n  ▶ 任务 {ti}/{len(task_specs)}: {sp}  [{tag}]")
+                for v, out in jobs_:
+                    print(f"     - {v}")
+                    print(f"       输出: {out}")
+        print(f"\n[dry-run] 未做任何处理，退出。")
         return
 
-    # ---- 安全提示：超过阈值才建议 --dry-run（小文件夹不打扰）----
-    if len(videos) > DRYRUN_SUGGEST_THRESHOLD:
-        print(f"\n⚠️ 找到 {len(videos)} 个视频，超过建议预览阈值({DRYRUN_SUGGEST_THRESHOLD})。")
+    # ---- 安全提示 / 超大目录确认（按视频总数）----
+    if total_videos > DRYRUN_SUGGEST_THRESHOLD:
+        print(f"\n⚠️ 共 {total_videos} 个视频，超过建议预览阈值({DRYRUN_SUGGEST_THRESHOLD})。")
         print("   建议先加 --dry-run 预览清单，确认无误后再正式运行"
               "（避免误抓软件自带视频/长时间空转）。")
-
-    # ---- 超大目录强制确认 ----
-    if len(videos) > BATCH_CONFIRM_THRESHOLD:
+    if total_videos > BATCH_CONFIRM_THRESHOLD:
         if sys.stdin.isatty():
-            ans = input(f"\n找到 {len(videos)} 个视频，确认要全部处理？(y/N) ").strip().lower()
+            ans = input(f"\n共 {total_videos} 个视频，确认要全部处理？(y/N) ").strip().lower()
             if ans not in ("y", "yes", "是"):
                 print("已取消。"); sys.exit(0)
         else:
-            print(f"\n⚠️ 非交互环境且视频数={len(videos)}>={BATCH_CONFIRM_THRESHOLD}，"
+            print(f"\n⚠️ 非交互环境且视频数={total_videos}>={BATCH_CONFIRM_THRESHOLD}，"
                   f"为安全起见请显式加 --dry-run 或确认后再运行。")
 
     ok, fail = 0, []
-    for i, v in enumerate(videos, 1):
-        base = os.path.splitext(os.path.basename(v))[0]
-        rel = os.path.dirname(os.path.relpath(v, src))
-        # 最终输出 = 输出根 / 输入文件夹镜像子路径 / 内部相对路径 / 视频名_notes
-        out = os.path.join(out_root, src_rel, rel, base + "_notes")
-        # 跳过标记用 index.html（默认核心交付，任何模式都会生成）；--all-formats 也含它
-        if not args.force and not args.reuse and os.path.exists(os.path.join(out, "index.html")):
-            print(f"\n[{i}/{len(videos)}] 跳过(已存在笔记): {v}")
-            ok += 1
-            continue
-        print(f"\n[{i}/{len(videos)}] 处理: {v}")
-        try:
-            process_one(v, out, args)
-            ok += 1
-        except SystemExit:
-            fail.append(v)
-        except Exception as e:
-            fail.append(v)
-            print(f"  [!!] 失败: {v} -> {e}")
+    done = 0
+    for ti, (sp, is_file, jobs_, srel) in enumerate(task_specs, 1):
+        print(f"\n===== 任务 {ti}/{len(task_specs)}: {sp}  ({len(jobs_)} 视频) =====")
+        if srel:
+            print(f"[*] 镜像子路径: {srel}")
+        for (v, out) in jobs_:
+            done += 1
+            # 跳过标记用 index.html（默认核心交付，任何模式都会生成）；--all-formats 也含它
+            if not args.force and not args.reuse and os.path.exists(os.path.join(out, "index.html")):
+                print(f"\n[{done}/{total_videos}] 跳过(已存在笔记): {v}")
+                ok += 1
+                continue
+            print(f"\n[{done}/{total_videos}] 处理: {v}")
+            try:
+                process_one(v, out, args)
+                ok += 1
+            except SystemExit:
+                fail.append(v)
+            except Exception as e:
+                fail.append(v)
+                print(f"  [!!] 失败: {v} -> {e}")
+        print(f"===== 任务 {ti}/{len(task_specs)} 完成 =====")
 
-    print(f"\n[OK] 批量完成：成功 {ok}/{len(videos)}")
+    print(f"\n[OK] 全部完成：{len(task_specs)} 个路径，成功 {ok}/{total_videos}")
     print(f"[*] 本次日志: {log_path}")
     if fail:
         print(f"  失败 {len(fail)} 个：")

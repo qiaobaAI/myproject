@@ -6,29 +6,35 @@ set "PYTHONIOENCODING=gbk:replace"
 set "PATH=%~dp0tools\ffmpeg\bin;%PATH%"
 
 echo ============================================
-echo   ±¾µØÊÓÆµ -^> AI ¸»±Ê¼Ç  (Êä³öµ½ output\, ½ö index.html)
-echo   ÎÞÉùÊÓÆµ/´¿Â¼ÆÁ: ÇëÏÈÔÚ Æô¶¯´óÄ£ÐÍ.bat Ñ¡ Ä£ÐÍ1(35BÊÓ¾õ)
+echo   ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Æµ -^> AI ï¿½ï¿½ï¿½Ê¼ï¿½  (ï¿½ï¿½ï¿½ï¿½ï¿½ output\, ï¿½ï¿½ index.html)
+echo   ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Æµ/ï¿½ï¿½Â¼ï¿½ï¿½: ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä£ï¿½ï¿½.bat Ñ¡ Ä£ï¿½ï¿½1(35Bï¿½Ó¾ï¿½)
 echo ============================================
 
 set "IN=%~1"
 if not defined IN (
-    set /p "IN=ÇëÍÏÈëÊÓÆµ»òÎÄ¼þ¼Ð, »òÕ³ÌùÍêÕûÂ·¾¶ºó»Ø³µ: "
+    set /p "IN=ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Æµï¿½ï¿½ï¿½Ä¼ï¿½ï¿½ï¿½, ï¿½ï¿½Õ³ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Â·ï¿½ï¿½ï¿½ï¿½Ø³ï¿½: "
 )
 if not defined IN (
-    echo Î´ÊäÈëÂ·¾¶, ÍË³ö¡£
+    echo Î´ï¿½ï¿½ï¿½ï¿½Â·ï¿½ï¿½, ï¿½Ë³ï¿½ï¿½ï¿½
     pause
     exit /b 1
 )
 set "IN=%IN:"=%"
 if not exist "%IN%" (
-    echo Â·¾¶²»´æÔÚ: "%IN%"
+    echo Â·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½: "%IN%"
     pause
     exit /b 1
 )
 
 cd /d "%~dp0"
-".venv\Scripts\python.exe" make_notes.py "%IN%"
+set "EXT=%~x1"
+if /i "%EXT%"==".txt" (
+    echo [é˜Ÿåˆ—æ¨¡å¼] è¯»å–è·¯å¾„åˆ—è¡¨æ–‡ä»¶: %IN%
+    ".venv\Scripts\python.exe" make_notes.py --queue "%IN%"
+) else (
+    ".venv\Scripts\python.exe" make_notes.py "%IN%"
+)
 
 echo.
-echo ========== È«²¿Íê³É, °´ÈÎÒâ¼üÍË³ö ==========
+echo ========== È«ï¿½ï¿½ï¿½ï¿½ï¿½, ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ë³ï¿½ ==========
 pause >nul
