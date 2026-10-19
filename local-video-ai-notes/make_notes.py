@@ -250,6 +250,96 @@ def parse_transcript(text):
     return segs
 
 
+def _srt_time_to_sec(s):
+    """'00:00:01,000' / '00:00:01.000' -> 秒(浮点)。"""
+    s = s.strip().replace(",", ".")
+    try:
+        h, m, rest = s.split(":")
+        sec, ms = rest.split(".")
+        return int(h) * 3600 + int(m) * 60 + int(sec) + int(ms.ljust(3, "0")[:3]) / 1000.0
+    except Exception:
+        return 0.0
+
+
+def _parse_srt(text):
+    """解析 SRT 字幕，返回 segs；非 SRT 返回空列表。"""
+    blocks = re.split(r"\n\s*\n", text.strip())
+    segs = []
+    time_re = re.compile(r"(\d{1,2}:\d{2}:\d{2}[,.]\d{1,3})\s*-->\s*(\d{1,2}:\d{2}:\d{2}[,.]\d{1,3})")
+    for blk in blocks:
+        lines = [l for l in blk.split("\n") if l.strip()]
+        if not lines:
+            continue
+        ti = None
+        for i, l in enumerate(lines):
+            m = time_re.search(l)
+            if m:
+                ti = i
+                break
+        if ti is None:
+            continue
+        start = _srt_time_to_sec(m.group(1))
+        txt = " ".join(lines[ti + 1:]).strip()
+        if txt:
+            segs.append({"start": start, "end": 0, "text": txt})
+    return segs
+
+
+def parse_subtitle_text(text):
+    """把字幕/逐字稿文本解析成 segs，兼容多种格式：
+    - whisper 风格: [mm:ss] 文本 / [hh:mm:ss] 文本
+    - SRT          : 序号\\n 00:00:01,000 --> 00:00:03,000\\n 文本
+    - LRC          : [00:00.50] 文本
+    - 纯文本(无时间戳): 整段作为一段, start=0
+    返回 segs(含 start/end/text)，供时间戳吸附、审核证据窗口使用。
+    """
+    text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    srt = _parse_srt(text)
+    if srt:
+        return srt
+    segs = []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        # whisper [mm:ss] / [hh:mm:ss]（先匹配，避免与 LRC 的 : 分隔冲突）
+        m = re.match(r"\[([\d:]+)\]\s*(.*)", s)
+        if m:
+            segs.append({"start": parse_ts(m.group(1)) or 0, "end": 0, "text": m.group(2)})
+            continue
+        # LRC [mm:ss.xx] 或 [mm:ss:xx]
+        m = re.match(r"\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\]\s*(.*)", s)
+        if m:
+            mm, ss, xx, txt = m.groups()
+            frac = (int(xx) / 100.0) if xx and len(xx) == 2 else (int(xx) / 1000.0 if xx else 0.0)
+            segs.append({"start": int(mm) * 60 + int(ss) + frac, "end": 0, "text": txt})
+            continue
+    if segs:
+        return segs
+    if text.strip():
+        return [{"start": 0, "end": 0, "text": text.strip()}]
+    return []
+
+
+def looks_like_queue(path):
+    """判断一个 .txt 是『路径清单(队列)』还是『字幕/逐字稿』。
+    队列特征：多数非空行像路径(含 \\ 或 / 或盘符，或真实存在)。
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except Exception:
+        return False
+    content = [l.strip() for l in lines if l.strip() and not l.strip().startswith("#")]
+    if not content:
+        return False
+    path_like = 0
+    for l in content:
+        if ("\\" in l or "/" in l) or re.match(r"^[A-Za-z]:", l) or os.path.exists(l):
+            path_like += 1
+    return path_like >= max(1, len(content) // 2)
+
+
 # ----------------------------------------------------------------------------
 # 3. 调用本地大模型 (OpenAI 兼容)
 # ----------------------------------------------------------------------------
@@ -898,7 +988,10 @@ def make_mindmap_mm(path, title, mindmap_text):
 
 def video_src_for_html(video, out):
     """返回 HTML <video> 可用的 src：
-    同盘符用相对路径(可随文件夹移动)，跨盘符(C/D/E...)回退到 file:// 绝对路径。"""
+    同盘符用相对路径(可随文件夹移动)，跨盘符(C/D/E...)回退到 file:// 绝对路径。
+    纯字幕模式传入 None 时返回空串(调用方据此渲染占位面板)。"""
+    if not video:
+        return ""
     try:
         rel = os.path.relpath(video, out).replace("\\", "/")
         return rel
@@ -951,15 +1044,19 @@ h2.blk{font-size:17px;margin:22px 0 8px}
 .qa .more{color:var(--muted);padding:8px 13px 11px;line-height:1.7}
 .qa ul{margin:0;padding:7px 14px 11px 30px}
 .qa li{line-height:1.75;margin:4px 0;color:#374151}
+#left.novideo{background:#eef1f5;color:#6b7280;flex-direction:column;text-align:center}
+#left.novideo .novideo-in{font-size:15px;line-height:1.9}
+#left.novideo .novideo-in span{display:block;font-size:12.5px;color:#9aa1ab;margin-top:6px}
 """
 
 HTML_JS = """
 document.querySelectorAll('[data-ts]').forEach(function(e){
   var s=e.getAttribute('data-ts'); if(!s) return;
   e.onclick=function(){
+    var v=document.getElementById('v'); if(!v) return;
     var p=s.split(':').map(Number);
     var t = p.length>2 ? (p[0]*3600+p[1]*60+p[2]) : (p[0]*60+(p[1]||0));
-    var v=document.getElementById('v'); v.currentTime=t; v.play();
+    v.currentTime=t; v.play();
   };
 });
 document.querySelectorAll('.toc a').forEach(function(a){
@@ -979,10 +1076,18 @@ def make_html(path, video_rel, title, intro, sections, summary_table, quiz,
     parts.append('<!doctype html><html lang="zh"><head><meta charset="utf-8">')
     parts.append('<meta name="viewport" content="width=device-width,initial-scale=1">')
     parts.append(f'<title>{esc(title)}</title><style>{HTML_CSS}</style></head><body>')
-    parts.append(f'<div id="left"><video id="v" controls src="{esc(video_rel)}"></video></div>')
+    if video_rel:
+        parts.append(f'<div id="left"><video id="v" controls src="{esc(video_rel)}"></video></div>')
+    else:
+        parts.append('<div id="left" class="novideo"><div class="novideo-in">'
+                     '📄 纯字幕 / 文本模式<br>'
+                     '<span>本笔记由字幕文本生成，无配套视频可播放</span></div></div>')
     parts.append('<div id="right">')
     parts.append(f'<h1>{esc(title)}</h1>')
-    meta = "🎬 本地视频 · 本地大模型生成 · 全程不出本机 · 点时间戳或截图可跳转视频"
+    if video_rel:
+        meta = "🎬 本地视频 · 本地大模型生成 · 全程不出本机 · 点时间戳或截图可跳转视频"
+    else:
+        meta = "📄 纯字幕/文本 · 本地大模型生成 · 全程不出本机"
     if vision_used:
         meta += " · 🔎 已视觉识别画面文字(无声/纯录屏可用)"
     UNSRC = "⚠️ [未在逐字稿中找到出处]"
@@ -1099,22 +1204,46 @@ def find_videos(folder, recursive=True, exts=None):
 # ----------------------------------------------------------------------------
 # 主流程（单视频）
 # ----------------------------------------------------------------------------
-def process_one(video, out, args):
-    """处理单个视频，产物输出到 out 目录。异常向上抛，由调用方处理批量容错。"""
+def process_one(video, out, args, transcript_file=None):
+    """处理单个视频，产物输出到 out 目录。异常向上抛，由调用方处理批量容错。
+    transcript_file 非空时进入『纯字幕/文本模式』：跳过抽帧/转写/视觉 OCR，
+    直接用该文本做 LLM 总结并生成笔记（适合已有字幕/逐字稿的场景）。"""
     os.makedirs(out, exist_ok=True)
     frames_dir = os.path.join(out, "截图")
-    base = os.path.splitext(os.path.basename(video))[0]
+    base = os.path.splitext(os.path.basename(transcript_file or video))[0]
     print(f"[*] 输出目录: {out}")
 
     transcript_path = os.path.join(out, "逐字稿.txt")
     reuse = getattr(args, "reuse", False) and os.path.exists(transcript_path)
+    transcript_mode = transcript_file is not None
 
-    if reuse:
+    if transcript_mode:
+        # ---- 纯字幕/文本模式：跳过抽帧/转写/视觉，直接用提供的文本 ----
+        print("[字幕模式] 跳过抽帧/转写，直接使用提供的字幕文本")
+        with open(transcript_file, encoding="utf-8") as f:
+            transcript = f.read()
+        segs = parse_subtitle_text(transcript)
+        if not segs:
+            segs = [{"start": 0, "end": 0, "text": transcript.strip()}]
+        manifest = []
+        dur, w, h = 0.0, 0, 0
+        # 把原文落盘为 逐字稿.txt，便于 --reuse 与人工查看
+        try:
+            import shutil
+            shutil.copyfile(transcript_file, transcript_path)
+        except Exception:
+            with open(transcript_path, "w", encoding="utf-8") as f:
+                f.write(transcript)
+        print(f"      载入 {len(segs)} 段字幕文本")
+
+    elif reuse:
         # ---- 复用已有转写稿与截图，跳过抽帧/转写(方便调提示词时快速重跑) ----
         print("[1-2/4] --reuse: 复用已有逐字稿与截图，跳过抽帧 / 转写")
         with open(transcript_path, encoding="utf-8") as f:
             transcript = f.read()
         segs = parse_transcript(transcript)
+        if not segs:  # SRT/LRC/纯文本复用兜底
+            segs = parse_subtitle_text(transcript)
         manifest = scan_frames(frames_dir, args.frame_interval)
         dur, w, h = 0.0, 0, 0
         print(f"      复用 {len(segs)} 段转写, {len(manifest)} 张截图")
@@ -1142,7 +1271,7 @@ def process_one(video, out, args):
     vision_used = False
     silent = len(transcript.strip()) < VISION_SILENT_CHARS
     vision_cache = os.path.join(out, "画面识别.txt")
-    if not args.no_llm and (args.vision or silent):
+    if not args.no_llm and (args.vision or silent) and not transcript_mode:
         if getattr(args, "reuse", False) and os.path.exists(vision_cache):
             print("[*] --reuse: 复用已有画面识别结果")
             vision_context = open(vision_cache, encoding="utf-8").read().strip()
@@ -1322,7 +1451,7 @@ def process_one(video, out, args):
     # HTML 是核心交付物，始终生成（左视频 + 右图文笔记，含 deepdive/code）
     try:
         make_html(os.path.join(out, "index.html"),
-                  video_src_for_html(video, out), title, intro, sections,
+                  video_src_for_html(None if transcript_mode else video, out), title, intro, sections,
                   summary_table, quiz, vision_used=vision_used,
                   asr_report=asr_report, audit_report=audit_report)
         print("  [OK] index.html (核心交付)")
@@ -1455,7 +1584,11 @@ def main():
     ap.add_argument("--vision-url", default=VISION_BASE_URL,
                     help="视觉模型端点(默认复用笔记端点 localhost:8000；需加载支持视觉的模型如35B才能OCR)")
     ap.add_argument("--vision-model", default=VISION_MODEL,
-                    help="视觉模型名(单模型服务下通常可忽略)")
+                   help="视觉模型名(单模型服务下通常可忽略)")
+    ap.add_argument("--transcript", nargs="*", default=None,
+                   help="纯字幕/逐字稿模式：直接传入 .txt（支持 whisper/SRT/LRC/纯文本格式），"
+                        "跳过抽帧与转写，仅用大模型做总结并生成 index.html。"
+                        "也可用 run.bat 直接拖入字幕 .txt（会自动识别为字幕而非队列）")
     args = ap.parse_args()
 
     out_root = os.path.abspath(args.out) if args.out else os.path.join(SCRIPT_DIR, "output")
@@ -1472,13 +1605,29 @@ def main():
     except Exception as e:
         print(f"[警告] 日志文件创建失败(仅影响记录, 不影响运行): {e}")
 
-    # ===== 构建任务清单：支持「多个路径」与「--queue 列表文件」=====
+    # ===== 构建任务清单：支持「多个路径」/「--queue 列表文件」/「纯字幕 .txt」=====
     raw_paths = list(args.video)
     if args.queue:
         raw_paths += read_queue(args.queue)
-    if not raw_paths:
-        print("未提供任何视频/文件夹路径。把视频/文件夹拖到 run.bat，或用 --queue 指定路径列表文件。")
+    if not raw_paths and not args.transcript:
+        print("未提供任何视频/文件夹/字幕路径。把视频或字幕 .txt 拖到 run.bat，"
+              "或用 --queue/--transcript 指定。")
         sys.exit(1)
+
+    # 把位置参数里的 .txt 自动分流：路径清单(队列) or 字幕/逐字稿
+    transcript_tasks = list(args.transcript or [])
+    expanded = []
+    for p in raw_paths:
+        ap = os.path.abspath(clean_input_path(p))
+        if os.path.isfile(ap) and ap.lower().endswith(".txt"):
+            if looks_like_queue(ap) and not args.transcript:
+                expanded += read_queue(ap)   # 当作队列清单展开
+                continue
+            else:
+                transcript_tasks.append(ap)  # 当作字幕/逐字稿
+                continue
+        expanded.append(p)
+    raw_paths = expanded
 
     tasks = []  # (绝对路径, 是否文件)
     for p in raw_paths:
@@ -1488,7 +1637,7 @@ def main():
             print(f"[!] 路径不存在，跳过: {ap}")
             continue
         tasks.append((ap, os.path.isfile(ap)))
-    if not tasks:
+    if not tasks and not transcript_tasks:
         print("没有有效路径，退出。"); sys.exit(1)
 
     # ---- 展开成「视频 -> 输出目录」作业对，并记录镜像子路径 ----
@@ -1517,11 +1666,13 @@ def main():
             task_specs.append((sp, False, job_pairs, srel))
             total_videos += len(vids)
 
-    if not task_specs:
-        print("未展开出任何待处理视频，退出。"); sys.exit(1)
+    if not task_specs and not transcript_tasks:
+        print("未展开出任何待处理任务，退出。"); sys.exit(1)
+
+    total_videos += len(transcript_tasks)  # 字幕任务也计入总配额(用于阈值/汇总)
 
     print(f"[*] 输出根目录: {out_root}")
-    print(f"[*] 共 {len(task_specs)} 个路径，{total_videos} 个视频待处理")
+    print(f"[*] 共 {len(task_specs)} 个视频路径、{len(transcript_tasks)} 个字幕任务、{total_videos} 项待处理")
 
     # ---- 仅预览：列出清单后退出，不调用 Whisper/LLM ----
     if args.dry_run:
@@ -1533,13 +1684,19 @@ def main():
             print(f"  文件大小: {sz/1024/1024:.1f} MB")
             print(f"  输出目录: {task_specs[0][2][0][1]}")
         else:
-            print(f"\n[dry-run] 将处理以下 {len(task_specs)} 个路径、{total_videos} 个视频（不调用 Whisper/LLM）：")
+            print(f"\n[dry-run] 将处理以下 {len(task_specs)} 个路径、{total_videos} 个视频/字幕（不调用 Whisper/LLM）：")
             for ti, (sp, is_file, jobs_, _) in enumerate(task_specs, 1):
                 tag = "文件" if is_file else f"文件夹({len(jobs_)} 视频)"
                 print(f"\n  ▶ 任务 {ti}/{len(task_specs)}: {sp}  [{tag}]")
                 for v, out in jobs_:
                     print(f"     - {v}")
                     print(f"       输出: {out}")
+        for tf in transcript_tasks:
+            base = os.path.splitext(os.path.basename(tf))[0]
+            dir_rel = mirror_rel(os.path.dirname(tf), args.mirror_from)
+            out = os.path.join(out_root, dir_rel, base + "_notes")
+            print(f"\n  ▶ 字幕任务: {tf}")
+            print(f"       输出: {out}")
         print(f"\n[dry-run] 未做任何处理，退出。")
         return
 
@@ -1580,6 +1737,27 @@ def main():
                 fail.append(v)
                 print(f"  [!!] 失败: {v} -> {e}")
         print(f"===== 任务 {ti}/{len(task_specs)} 完成 =====")
+
+    # ---- 纯字幕/逐字稿任务 ----
+    for tf in transcript_tasks:
+        done += 1
+        base = os.path.splitext(os.path.basename(tf))[0]
+        dir_rel = mirror_rel(os.path.dirname(tf), args.mirror_from)
+        out = os.path.join(out_root, dir_rel, base + "_notes")
+        if not args.force and not args.reuse and os.path.exists(os.path.join(out, "index.html")):
+            print(f"\n[{done}/{total_videos}] 跳过(已存在笔记): {tf}")
+            ok += 1
+            continue
+        print(f"\n[{done}/{total_videos}] [字幕模式] 处理: {tf}")
+        print(f"  输出: {out}")
+        try:
+            process_one(tf, out, args, transcript_file=tf)
+            ok += 1
+        except SystemExit:
+            fail.append(tf)
+        except Exception as e:
+            fail.append(tf)
+            print(f"  [!!] 失败: {tf} -> {e}")
 
     print(f"\n[OK] 全部完成：{len(task_specs)} 个路径，成功 {ok}/{total_videos}")
     print(f"[*] 本次日志: {log_path}")
