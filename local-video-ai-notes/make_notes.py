@@ -34,6 +34,16 @@ LLM_MAX_TOKENS = 7000  # 放开输出长度上限(含 deepdive/code 扩展内容
 FRAME_INTERVAL = 30  # 秒：每隔多少秒抽一帧
 CHUNK_TOKENS = 5000  # 转写稿超过此估算 token 数则分块总结
 
+# ---- 质量三道闸（防幻觉 / 防错字 / 二次核对）----
+# 1) 温度：事实抽取要稳，越低越"照稿念"，越高越爱发挥编造
+LLM_TEMPERATURE = 0.2
+# 2) ASR 纠错：独立一步把音近错字改对，避免错词带偏后续总结
+ASR_FIX_CHUNK_CHARS = 2200   # 每块字符数(控制单次输入+输出预算，远低于 16384)
+# 3) 二次审核：按每节时间戳回捞原文，逐条核对知识点是否有出处
+AUDIT_WINDOW_SEC = 150       # 每节摘取「起始时间前后 N 秒」的原文送审，省 token 且更精准
+AUDIT_MAX_CHARS = 9000       # 单次审核输入上限，超了自动分批
+AUDIT_STRICT_DEFAULT = False  # 默认：找不到出处只标记不删（保守，不丢信息）
+
 # 视觉 OCR：默认复用笔记模型端点。
 # 说明：本机有两个本地模型——
 #   模型1 = Qwen3.6-35B-A3B(Q2_K_P，带 mmproj 视觉)，模型2 = Qwen3-30B-A3B(Q4_K_M，纯文本)。
@@ -243,7 +253,8 @@ def parse_transcript(text):
 # ----------------------------------------------------------------------------
 # 3. 调用本地大模型 (OpenAI 兼容)
 # ----------------------------------------------------------------------------
-def call_llm(base_url, api_key, model, system, user, timeout=900, max_tokens=LLM_MAX_TOKENS):
+def call_llm(base_url, api_key, model, system, user, timeout=900,
+             max_tokens=LLM_MAX_TOKENS, temperature=LLM_TEMPERATURE):
     import requests
     url = base_url.rstrip("/") + "/chat/completions"
     payload = {
@@ -252,7 +263,7 @@ def call_llm(base_url, api_key, model, system, user, timeout=900, max_tokens=LLM
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        "temperature": 0.3,
+        "temperature": temperature,
         "max_tokens": max_tokens,
     }
     r = requests.post(url, headers={"Authorization": f"Bearer {api_key}"},
@@ -351,22 +362,36 @@ def vision_ocr(frames_dir, manifest, base_url, api_key, model,
 
 
 def llm_summary(chunk_text, manifest_str, base_url, api_key, model,
-                is_final=False, max_tokens=LLM_MAX_TOKENS, vision_context=""):
+                is_final=False, max_tokens=LLM_MAX_TOKENS, vision_context="",
+                temperature=LLM_TEMPERATURE, segs=None, duration=None):
     sys_p = (
         "你是资深技术讲师，擅长把视频内容整理成『可以直接复习』的深度学习笔记"
         "(风格对标优质付费课程笔记：讲解详细、有具体类名方法名、有易混点提示)。"
-        "根据转写稿和截图清单，产出结构化、有信息量的中文笔记。"
+        "根据转写稿和截图清单，产出结构化、有信息量的中文笔记。\n"
+        "【事实纪律 · 违反任一条即视为不合格】\n"
+        "A. 唯一信息源 = 下面提供的【转写稿】+【画面视觉识别内容】。"
+        "严禁引入这两者中未出现的任何技术概念、产品名、命令、参数、版本号、年份、数字。"
+        "你脑子里知道但材料里没有的，一律不许写进 points/note/summary_table。\n"
+        "B. 转写稿是语音识别(ASR)结果，存在音近错字"
+        "(如 Linux 被识别成 Lilix/Ledix/ULIX、CentOS 识别成 sintos；中文里也常见同音词错认)。"
+        "请在整理时先按上下文校正成正确术语，最终输出用正确写法；"
+        "并把每一处你改动过的词写进 asr_fixes 字段，方便人工复核。"
+        "拿不准的**不要猜**：保留原文并在该词后加 [?]。\n"
+        "C. deepdive 允许做类比和延伸，但必须自报身份：类比句以『（类比，视频未提）』开头，"
+        "延伸句以『（延伸，非视频内容）』开头。未标注的一律视为正文事实，会被判为编造。\n"
+        "D. ts 只能用转写稿里真实出现过的 [mm:ss]；截图只能从给定清单里挑文件名。\n"
         "只输出一个 JSON 对象，不要任何解释。字段格式:\n"
         "{\n"
         '  "title": "整份笔记标题",\n'
         '  "intro": "2-4句导读: 这个视频讲什么、解决什么问题、学完能掌握什么",\n'
+        '  "asr_fixes": [{"wrong": "转写稿里的错误写法", "right": "校正后的正确术语"}],\n'
     '  "sections": [\n'
     '    {"heading": "小节标题(要具体到知识点, 不要笼统)",\n'
     '     "ts": "mm:ss 该节起始时间",\n'
     '     "frame": "从截图清单里选与该节最贴切的截图文件名, 或 null",\n'
     '     "points": ["要点1(1-3句完整讲解)", "要点2", ...],\n'
     '     "note": "该节的易混点/面试考点提示, 没有则空串",\n'
-    '     "deepdive": "底层原理/延伸知识(2-5句). 在视频已讲内容之上合理扩展, 解释背后的机制; 用生活类比讲清(朴素日常事物如小区物业/快递/排队/做菜), 先讲类比再点破对应技术点; 类比讲\'什么感觉\', 机制讲\'为什么\'; 不编造术语, 不确定标注\'拓展思考\'",\n'
+    '     "deepdive": "底层原理/延伸知识(2-5句). 用生活类比讲清(朴素日常事物如小区物业/快递/排队/做菜), 先类比后点破技术对应; 类比句必须以『（类比，视频未提）』开头, 讲机制的部分若超出视频内容必须以『（延伸，非视频内容）』开头; 不编造术语, 拿不准就写『（延伸，非视频内容）推测：…』",\n'
     '     "code": [{"desc": "代码说明: 这段在做什么/关键步骤/输入/输出/设计意图(帮助看不懂代码的人理解)", "lang": "java", "snippet": "尽量还原视频真实代码或伪代码; 无代码可写 null 或留空"}]\n'
     '    }\n'
     '  ],\n'
@@ -376,16 +401,22 @@ def llm_summary(chunk_text, manifest_str, base_url, api_key, model,
     '  "quiz": [{"q": "题目", "a": "答案"}]\n'
     "}\n"
     "硬性要求:\n"
+    "0) 每条 point 都必须能在【转写稿】或【画面视觉识别内容】里找到出处；找不到出处的宁可不写，"
+    "绝不允许凑数编造。**严禁把『行业通用做法/标准流程』当成视频内容**："
+    "讲师没讲的步骤(具体的 kubectl/docker 命令、配置项名、参数值、默认端口)，"
+    "哪怕你非常确定业界就是这么做的，也不许写进 points/note/summary_table；\n"
     "1) 每个 point 不是短语，而是 1-3 句完整讲解，讲清『是什么/为什么/怎么做』，"
     "尽量复用转写稿里的具体类名、方法名、参数、版本、结论；\n"
-    "2) sections 按逻辑细分，一共至少 4 节；每节 3-6 个 points，信息量要足，"
-    "让人不看视频也能复习到位；\n"
-    "3) summary_table 至少 4 行，覆盖本段核心知识点，level 用 ★ 表示难度；\n"
-    "4) quiz 出 3 道有区分度的题；\n"
+    "2) sections 数量**由原文信息量决定**：讲了几个话题就写几节(常见 2-6 节)，"
+    "每节 2-6 个 points。**严禁为了凑数量而拆分、注水或编造**；"
+    "原文本就只有寥寥几句时，宁可只写 2 节、每节 2 条，也不要凑成 4 节 6 条；\n"
+    "3) summary_table 只收原文确实讲到的知识点，有几条写几条(2 条以上即可)，不要凑数，level 用 ★ 表示难度；\n"
+    "4) quiz 出 1-3 道，且只能考原文明确讲过的内容；不要出需要课外知识才能答的题；\n"
     "5) frame 只能从给定截图清单里挑文件名，不要编造；\n"
-    "6) 每节必须有 deepdive：在视频已讲内容之上做合理延伸，解释底层原理/本质机制；"
-    "必须用『生活类比』方式讲(朴素可感知的日常事物)，先类比后点破技术对应；类比负责『是什么感觉』，机制负责『为什么』，二者缺一不可；"
-    "不要编造术语，拿不准就写明是拓展思考；\n"
+    "6) 每节必须有 deepdive：用『生活类比』讲清底层原理/本质机制(朴素可感知的日常事物)，先类比后点破技术对应；"
+    "为避免与视频事实混淆，类比句必须以『（类比，视频未提）』开头，"
+    "超出视频内容的机制解释必须以『（延伸，非视频内容）』开头；"
+    "不要编造术语，拿不准就写『（延伸，非视频内容）推测：…』；\n"
     "7) 每节若有代码实现，用 code 给出 desc(必填，解释代码意图/关键步骤/输入输出/设计动机) + snippet(尽量还原视频真实代码片段或伪代码)；"
     "无代码则该节 code 给空数组 [] 或 null；desc 的核心作用是让看不懂代码的人也能理解其逻辑。\n"
     "8) 若提供了【画面视觉识别内容】，必须结合其中的屏幕文字/代码/图表来丰富笔记；"
@@ -399,8 +430,259 @@ def llm_summary(chunk_text, manifest_str, base_url, api_key, model,
             "\n\n【画面视觉识别内容(模型对关键帧的OCR/描述，请务必结合其中的屏幕文字/代码补充笔记；"
             "若转写稿为空或稀疏，画面内容即主要信息来源)】\n" + vision_context
         )
-    content = call_llm(base_url, api_key, model, sys_p, user_p, max_tokens=max_tokens)
+    # 硬边界：告诉模型「视频实际讲到哪」，堵住"看到标题就脑补全流程"这个最大的幻觉来源。
+    # 实测过的翻车：视频只讲"怎么拿到部署文件"，模型却补出了 kubectl apply / Deployment /
+    # Service / Pod 状态检查 一整套标准流程 —— 全是课外知识。
+    if segs:
+        try:
+            last = max(s["start"] for s in segs)
+            bound = f"\n\n【内容边界(非常重要)】本段转写稿实际覆盖到 {fmt_ts(last)}"
+            if duration:
+                bound += f"（视频总长约 {fmt_ts(duration)}）"
+            bound += (
+                "。你只能总结这段转写稿里**真实讲到**的内容。"
+                "如果讲师只讲到「获取/下载部署文件」这一步，那么笔记就只写到这一步为止；"
+                "**严禁按标题或行业惯例脑补后续步骤**"
+                "（例如没讲过的 kubectl/docker 命令、没出现过的配置项名、"
+                "没演示过的 Pod/容器状态检查，一律不得出现）。"
+                "笔记的价值在于「忠实还原这一小节讲了什么」，而不是补全成一门完整教程。"
+            )
+            user_p += bound
+        except Exception:
+            pass
+    content = call_llm(base_url, api_key, model, sys_p, user_p,
+                       max_tokens=max_tokens, temperature=temperature)
     return extract_json(content)
+
+
+# ----------------------------------------------------------------------------
+# 3.5 质量闸门 ①：ASR 音近错字校正（独立一步，纯确定性改写）
+# ----------------------------------------------------------------------------
+def fix_transcript(transcript, base_url, api_key, model,
+                   chunk_chars=ASR_FIX_CHUNK_CHARS, timeout=600):
+    """把逐字稿里的 ASR 音近错字改对，其余一个字不动。
+
+    为什么要单独一步：若让模型"边纠错边总结"，它会把注意力放在编内容上，
+    错字反而被悄悄沿用(例如 Linux→Lilix 这种会一路带偏到考点和术语)。
+    这里强制它只做「校对」这一件事，输出仍是 [mm:ss] 原文行格式，可逐行比对。
+
+    返回 (校正稿, 改动列表)。改动列表是 [(wrong, right), ...]，用于报告留痕。
+    """
+    if not transcript.strip():
+        return transcript, []
+
+    lines = transcript.splitlines()
+    # 按字符数切块，尽量在行边界断开，保证时间戳不被拆散
+    blocks, buf, cnt = [], [], 0
+    for ln in lines:
+        if cnt + len(ln) > chunk_chars and buf:
+            blocks.append("\n".join(buf))
+            buf, cnt = [], 0
+        buf.append(ln)
+        cnt += len(ln)
+    if buf:
+        blocks.append("\n".join(buf))
+
+    sys_p = (
+        "你是技术字幕校对员。输入是一段语音识别(ASR)生成的逐字稿，带 [mm:ss] 时间戳。\n"
+        "你的唯一任务是：把其中的**音近错字、专有名词错误、中英混杂识别错误**改正。\n"
+        "严格规则：\n"
+        "1) 不得改写句子结构，不得润色，不得删减或补充任何内容；\n"
+        "2) 不得合并、拆分或以任何方式改变行的数量与顺序；每行必须以原样的 [mm:ss] 开头；\n"
+        "3) 英文技术名词的识别错误按上下文改正，例如："
+        "Lilix/Ledix/ULIX→Linux，sintos→CentOS，redheart→Red Hat，U版兔→Ubuntu，"
+        "卖SQL→MySQL，Elatic测试→Elasticsearch，Floen的地→Fluentd，肯班达→Kibana；\n"
+        "4) 中文技术词被听成近音词的情况**同样必须改**，这最容易漏："
+        "清单→常被听成「轻量」、部署→「不熟」、克隆→「克龙」、目录→「目楼」、"
+        "镜像→「竞相」、托管→「拖管」、步骤→「次步」、日志→「日质」；"
+        "请结合上下文判断，属于这类明显误听的直接改正；\n"
+        "5) 只改**明显**错误的词；实在无法判断的保持原样，不要猜；\n"
+        "6) 输出只包含校对后的逐字稿正文，不要任何解释、不要代码块围栏。\n"
+    )
+
+    fixed_blocks, changes = [], []
+    for i, blk in enumerate(blocks, 1):
+        try:
+            out = call_llm(base_url, api_key, model, sys_p,
+                           "请校对下面这段逐字稿：\n\n" + blk,
+                           timeout=timeout, max_tokens=min(LLM_MAX_TOKENS, 4000),
+                           temperature=0.0)
+        except Exception as e:
+            print(f"      [!] ASR 纠错第 {i}/{len(blocks)} 块失败，保留原文: {e}")
+            fixed_blocks.append(blk)
+            continue
+        out = (out or "").strip()
+        # 去掉可能被包上的 ``` 围栏
+        out = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", out).strip()
+        # 行数对不上说明模型跑偏了(增删了行) → 保留原文更安全
+        if not out or abs(len(out.splitlines()) - len(blk.splitlines())) > max(3, len(blk.splitlines()) // 10):
+            print(f"      [!] ASR 纠错第 {i} 块行数异常，保留原文")
+            fixed_blocks.append(blk)
+            continue
+        fixed_blocks.append(out)
+        # 逐行比对留痕
+        for a, b in zip(blk.splitlines(), out.splitlines()):
+            if a != b:
+                changes.append((a, b))
+
+    return "\n".join(fixed_blocks), changes
+
+
+# ----------------------------------------------------------------------------
+# 3.6 质量闸门 ②：时间戳硬校验（纯代码，不花 LLM）
+# ----------------------------------------------------------------------------
+def snap_ts(ts, segs, tol=90):
+    """把模型给的 ts 吸附到转写稿真实存在的段落起点上。
+
+    模型很爱把时间戳"编个大概"，导致点开视频跳到错位置。
+    这里用真实段落做锚点：距离最近段落超过 tol 秒就说明这个时间点根本不存在，
+    直接改用最接近的真实段落时间。
+    """
+    t = parse_ts(str(ts or ""))
+    if t is None or not segs:
+        return ts
+    starts = [s["start"] for s in segs]
+    nearest = min(starts, key=lambda x: abs(x - t))
+    if abs(nearest - t) > tol:
+        return fmt_ts(nearest)
+    return ts
+
+
+# ----------------------------------------------------------------------------
+# 3.7 质量闸门 ③：二次审核（逐条回溯出处，清幻觉）
+# ----------------------------------------------------------------------------
+def _window_text(segs, ts, window=AUDIT_WINDOW_SEC, end_ts=None):
+    """取某节的"证据窗口"原文。
+
+    优先用「下一节起始时间」当右边界——这样一节 6 分钟也能完整覆盖，
+    否则固定 150 秒会把本节后半段切掉，导致大量知识点被误判成"无出处"。
+    没有 end_ts 时才退回固定窗口。
+    """
+    t = parse_ts(str(ts or "")) or 0
+    e = parse_ts(str(end_ts or "")) if end_ts else None
+    if e is None or e <= t:
+        e = t + window
+    # 前后各留 15s 缓冲，避免边界处的内容被漏判
+    picked = [s for s in segs if t - 15 <= s["start"] <= e + 15]
+    if not picked:
+        return ""
+    return "\n".join(f"[{fmt_ts(s['start'])}] {s['text']}" for s in picked)
+
+
+def audit_notes(sections, base_url, api_key, model, segs,
+                strict=AUDIT_STRICT_DEFAULT, timeout=900):
+    """逐条核对：每个 point 能否在该节时间窗的原文里找到依据。
+
+    返回 (处理后的 sections, 报告行列表)。
+    默认策略：找不到出处的 point **加标记不删除**（不丢信息）；
+    strict=True 时直接删除。
+    """
+    if not sections or not segs:
+        return sections, []
+
+    # ---- 组装待审条目 + 证据窗口 ----
+    payload_parts, index_map = [], []
+    for si, s in enumerate(sections):
+        pts = _norm_points(s)
+        if not pts:
+            continue
+        nxt = sections[si + 1].get("ts") if si + 1 < len(sections) else None
+        win = _window_text(segs, s.get("ts"), end_ts=nxt)
+        if not win:
+            continue
+        lines = [f"## 第{si+1}节《{s.get('heading','')}》 声称起始 {s.get('ts','')}",
+                 "【该时间窗原文】", win, "【该节待核对的知识点】"]
+        for pi, p in enumerate(pts):
+            lines.append(f"P{pi+1}. {p}")
+            index_map.append((si, pi, p))
+        payload_parts.append("\n".join(lines))
+
+    if not payload_parts:
+        return sections, []
+
+    # 输入超长则分批审（每批独立判定，互不影响）
+    batches, buf, cnt = [], [], 0
+    for part in payload_parts:
+        if cnt + len(part) > AUDIT_MAX_CHARS and buf:
+            batches.append("\n\n".join(buf)); buf, cnt = [], 0
+        buf.append(part); cnt += len(part)
+    if buf:
+        batches.append("\n\n".join(buf))
+
+    sys_p = (
+        "你是笔记审校员。任务是逐条核对笔记知识点是否**真的来自原文**。\n"
+        "判定标准（严格）：\n"
+        "- ok：该时间窗原文明确讲到这条内容(同义表述也算)；\n"
+        "- annotate：原文没讲，或只是合理联想/课外延伸，无法在原文找到依据；\n"
+        "- 原文只提到词、没给出该条里的具体结论/数字/因果 → 也算 annotate。\n"
+        "注意：不要把『听起来很合理』当成有出处；不要替笔记补全理由。\n"
+        "只输出 JSON，不要解释，格式：\n"
+        '{"items": [{"sec": 1, "p": 1, "verdict": "ok|annotate", "ts": "mm:ss 依据处时间, 没找到留空", "why": "一句话理由"}]}\n'
+        "必须为每个 P 编号都给出判定，不许漏。\n"
+    )
+
+    verdicts = {}
+    total_items = 0
+    for bi, batch in enumerate(batches, 1):
+        user_p = ("请逐条核对下列各节知识点。\n\n" + batch +
+                  "\n\n输出 JSON：items 覆盖上面出现的每个 P 编号。")
+        try:
+            raw = call_llm(base_url, api_key, model, sys_p, user_p,
+                           timeout=timeout, max_tokens=3000, temperature=0.0)
+        except Exception as e:
+            print(f"      [!] 审核第 {bi}/{len(batches)} 批失败，跳过审核: {e}")
+            return sections, []
+        j = extract_json(raw)
+        if not j or "items" not in j:
+            print(f"      [!] 审核第 {bi} 批返回解析失败，跳过")
+            continue
+        for it in j.get("items", []) or []:
+            try:
+                key = (int(it.get("sec")) - 1, int(it.get("p")) - 1)
+            except Exception:
+                continue
+            verdicts[key] = it
+            total_items += 1
+
+    if not verdicts:
+        return sections, []
+
+    # ---- 按判定原地处理 ----
+    report, dropped, flagged = [], 0, 0
+    bad = []
+    for (si, pi, p) in index_map:
+        it = verdicts.get((si, pi))
+        if not it:
+            continue
+        v = str(it.get("verdict", "")).strip().lower()
+        if v == "ok":
+            continue
+        why = str(it.get("why", "") or "").strip()
+        if strict:
+            bad.append((si, pi))
+            dropped += 1
+            report.append(f"[删除] 第{si+1}节 P{pi+1}: {p[:60]}  ← {why}")
+        else:
+            pts = _norm_points(sections[si])
+            if pi < len(pts):
+                pts[pi] = "⚠️ [未在逐字稿中找到出处] " + pts[pi]
+                sections[si]["points"] = pts
+            flagged += 1
+            report.append(f"[存疑] 第{si+1}节 P{pi+1}: {p[:60]}  ← {why}")
+
+    if strict:
+        for si in sorted({x[0] for x in bad}, reverse=True):
+            idxs = sorted([pi for s2, pi in bad if s2 == si], reverse=True)
+            pts = _norm_points(sections[si])
+            for pi in idxs:
+                if pi < len(pts):
+                    pts.pop(pi)
+            sections[si]["points"] = pts
+
+    if report:
+        print(f"      审核: 核对 {total_items} 条, "
+              f"{'删除' if strict else '标记存疑'} {dropped or flagged} 条")
+    return sections, report
 
 
 def llm_mindmap(title, outline_text, base_url, api_key, model):
@@ -414,6 +696,27 @@ def llm_mindmap(title, outline_text, base_url, api_key, model):
 # ----------------------------------------------------------------------------
 # 4. 组装输出
 # ----------------------------------------------------------------------------
+def _normalize_sections(sections):
+    """清洗模型返回的字段类型。
+
+    实测：Qwen 会把 deepdive 里"类比 + 延伸"两句话理解成两个元素的数组，
+    直接渲染出来就是 ['(类比…)…', '(延伸…)…'] 一串方括号，非常难看。
+    这里统一拼成字符串；note/heading 同样兜底。
+    """
+    for s in sections or []:
+        if not isinstance(s, dict):
+            continue
+        for k in ("heading", "note", "deepdive", "ts"):
+            v = s.get(k)
+            if isinstance(v, (list, tuple)):
+                s[k] = "；".join(str(x).strip() for x in v if str(x).strip())
+            elif v is None:
+                s[k] = ""
+        if isinstance(s.get("code"), dict):
+            s["code"] = [s["code"]]
+    return sections
+
+
 def _norm_points(s):
     """points 兼容字符串与 {text:..} 两种形态。"""
     out = []
@@ -624,6 +927,7 @@ body{font-family:system-ui,"Microsoft YaHei",sans-serif;margin:0;display:flex;he
 .ts:hover{background:#dde9ff}
 .sec ul{margin:6px 0;padding-left:20px}
 .sec li{line-height:1.85;margin:5px 0;font-size:14px}
+.sec li.unv{background:#fdf1f0;border-left:3px solid #d9534f;padding:5px 9px;border-radius:5px;color:#8a2b28;list-style:none;margin-left:-20px;padding-left:10px}
 .note{background:#fff8e6;border-left:3px solid #f0b400;padding:8px 11px;border-radius:6px;font-size:13px;color:#7a5b00;margin:9px 0;line-height:1.7}
 .shot{width:100%;border:1px solid var(--line);border-radius:8px;margin:11px 0 4px;cursor:pointer;display:block}
 .shot:hover{box-shadow:0 3px 14px rgba(0,0,0,.16)}
@@ -640,6 +944,13 @@ table.kt tr:nth-child(even) td{background:#fafbfc}
 pre.code{background:#0f172a;color:#e2e8f0;border-radius:8px;padding:12px 14px;overflow:auto;font-size:12.5px;line-height:1.6;margin:4px 0 10px}
 pre.code code{font-family:"SFMono-Regular",Consolas,"Courier New",monospace;white-space:pre}
 h2.blk{font-size:17px;margin:22px 0 8px}
+.qa{margin-bottom:16px;border:1px solid var(--line);border-radius:10px;overflow:hidden;font-size:13px}
+.qa h3{margin:0;padding:9px 13px;font-size:13px;font-weight:600;display:flex;align-items:center;gap:6px}
+.qa.fix h3{color:#1d6f42;background:#f0faf3}
+.qa.flag h3{color:#a8431f;background:#fdf3ee}
+.qa .more{color:var(--muted);padding:8px 13px 11px;line-height:1.7}
+.qa ul{margin:0;padding:7px 14px 11px 30px}
+.qa li{line-height:1.75;margin:4px 0;color:#374151}
 """
 
 HTML_JS = """
@@ -661,7 +972,7 @@ document.querySelectorAll('.toc a').forEach(function(a){
 
 
 def make_html(path, video_rel, title, intro, sections, summary_table, quiz,
-              vision_used=False):
+              vision_used=False, asr_report=None, audit_report=None):
     def esc(s):
         return _html.escape(str(s if s is not None else ""))
     parts = []
@@ -674,9 +985,29 @@ def make_html(path, video_rel, title, intro, sections, summary_table, quiz,
     meta = "🎬 本地视频 · 本地大模型生成 · 全程不出本机 · 点时间戳或截图可跳转视频"
     if vision_used:
         meta += " · 🔎 已视觉识别画面文字(无声/纯录屏可用)"
+    UNSRC = "⚠️ [未在逐字稿中找到出处]"
+    flagged_n = sum(1 for s in sections for p in _norm_points(s)
+                    if p.startswith(UNSRC))
+    if flagged_n:
+        meta += f" · ⚠️ {flagged_n} 条未经原文核实，已在下方标红(详见 审核报告.txt)"
     parts.append(f'<div class="meta">{meta}</div>')
     if intro:
         parts.append(f'<div class="intro">💡 <b>导读：</b>{esc(intro)}</div>')
+    # 质量追溯卡片：把"做了哪些纠错/标记"直接摆在笔记头部，信任信号可见，
+    # 不必再额外打开 审核报告.txt（报告仍会落盘，供深究）。
+    if asr_report or audit_report:
+        if asr_report:
+            parts.append(
+                f'<div class="qa fix"><h3>🔧 已自动校正 {len(asr_report)} 处转写术语错字</h3>'
+                f'<div class="more">（如 Linux/Lilix、Elasticsearch/Elatic测试、Kibana/肯班达 等音近误识别，'
+                f'全量见 审核报告.txt）</div></div>')
+        if audit_report:
+            items = "".join(f"<li>{esc(x)}</li>" for x in audit_report[:10])
+            more = (f'<div class="more">…其余 {len(audit_report) - 10} 条见 审核报告.txt</div>'
+                    if len(audit_report) > 10 else "")
+            parts.append(
+                f'<div class="qa flag"><h3>⚠️ {len(audit_report)} 条知识点未经原文核实'
+                f'（已在正文标红，请重点核对）</h3><ul>{items}</ul>{more}</div>')
     if len(sections) > 1:
         toc = "".join(f'<a href="#sec{i}">{i}. {esc(s.get("heading",""))}</a>'
                       for i, s in enumerate(sections, 1))
@@ -688,7 +1019,8 @@ def make_html(path, video_rel, title, intro, sections, summary_table, quiz,
             head += f' <span class="ts" data-ts="{esc(ts)}">⏱️ {esc(ts)}</span>'
         parts.append(f'<div class="sec" id="sec{i}"><h2>{head}</h2><ul>')
         for p in _norm_points(s):
-            parts.append(f"<li>{esc(p)}</li>")
+            cls = ' class="unv"' if p.startswith(UNSRC) else ""
+            parts.append(f"<li{cls}>{esc(p)}</li>")
         parts.append("</ul>")
         if s.get("note"):
             parts.append(f'<div class="note">🔎 <b>考点/易混点：</b>{esc(s["note"])}</div>')
@@ -825,6 +1157,36 @@ def process_one(video, out, args):
                 print("      无可用视觉内容(模型不支持视觉或画面无文字)；"
                       "若视频确实无声，请在 启动大模型.bat 选 模型1(35B视觉) 再跑")
 
+    # 2.6 质量闸门①：ASR 音近错字校正（独立一步，只校对不改写）
+    # 为什么要独立：让模型"边纠错边总结"时，它往往忙着编内容，错字被原样沿用
+    # （Linux→Lilix 这种会一路带偏术语、考点甚至代码）。这里先把它校干净再总结。
+    asr_report, audit_report = [], []
+    fix_cache = os.path.join(out, "逐字稿-校正.txt")
+    if args.no_llm or getattr(args, "no_asr_fix", False):
+        pass
+    elif getattr(args, "reuse", False) and os.path.exists(fix_cache):
+        fixed = open(fix_cache, encoding="utf-8").read()
+        if fixed.strip():
+            print("[2.6/4] --reuse: 复用已有校正稿")
+            transcript = fixed
+            segs = parse_transcript(fixed)
+    elif transcript.strip():
+        print("[2.6/4] ASR 音近错字校正 ...")
+        fixed, changes = fix_transcript(transcript, args.llm_base,
+                                        args.api_key, args.llm_model)
+        if fixed.strip() and fixed != transcript:
+            transcript = fixed
+            segs = parse_transcript(fixed)
+            with open(fix_cache, "w", encoding="utf-8") as f:
+                f.write(fixed)
+            asr_report = changes
+            print(f"      校正 {len(changes)} 行 (明细见 审核报告.txt)")
+            for a, b in changes[:5]:
+                print(f"        - {a[:60]}")
+                print(f"        + {b[:60]}")
+        else:
+            print("      未发现需要校正的词，原文沿用")
+
     # 3. 本地大模型总结
     sections, quiz, summary_table = [], [], []
     mindmap_text, intro, title = "", "", base
@@ -851,13 +1213,22 @@ def process_one(video, out, args):
                 j = llm_summary(ch, manifest_str, args.llm_base, args.api_key,
                                 args.llm_model, is_final=(len(chunks) == 1),
                                 max_tokens=args.max_tokens,
-                                vision_context=vision_context)
+                                vision_context=vision_context,
+                                temperature=args.temperature,
+                                segs=segs, duration=dur)
                 if j and "sections" in j:
                     if j.get("title") and (idx == 0 or not title or title == base):
                         title = j["title"]
                     if j.get("intro") and not intro:
                         intro = j["intro"]
-                    sections.extend(j.get("sections", []) or [])
+                    sections.extend(_normalize_sections(j.get("sections", []) or []))
+                    # 模型在总结阶段自报的术语校正也留痕，方便人工抽查
+                    for fx in (j.get("asr_fixes") or []):
+                        if isinstance(fx, dict):
+                            w = str(fx.get("wrong", "") or "").strip()
+                            r = str(fx.get("right", "") or "").strip()
+                            if w and r and w != r:
+                                asr_report.append((f"[总结时自报] {w}", f"[校正为] {r}"))
                     quiz.extend(j.get("quiz", []) or [])
                     summary_table.extend(j.get("summary_table", []) or [])
                     print(f"      第 {idx+1}/{len(chunks)} 块: +{len(j.get('sections',[]) or [])} 节")
@@ -869,11 +1240,38 @@ def process_one(video, out, args):
                 failed = True
                 break
 
+        # 3.5 质量闸门②：时间戳吸附到真实段落（纯代码，不花 LLM）
+        # 模型爱把 ts 编个大概，导致点开视频跳到错位置；先修 ts，再据此挑截图。
+        for s in sections:
+            old = s.get("ts")
+            s["ts"] = snap_ts(old, segs)
+            if old and s["ts"] != old:
+                print(f"      [i] 时间戳校正: {old} → {s['ts']}")
+
+        # 模型偶尔把小节顺序排乱(实测出现过 02:00 后面跟 00:30)，按真实时间重排，
+        # 否则目录顺序错、审核的"证据窗口"也会取到错误区间。
+        if len(sections) > 1:
+            before = [str(s.get("ts", "")) for s in sections]
+            sections.sort(key=lambda s: parse_ts(s.get("ts")) or 0)
+            after = [str(s.get("ts", "")) for s in sections]
+            if before != after:
+                print(f"      [i] 小节顺序已按时间重排: {' '.join(before)} → {' '.join(after)}")
+
         # 截图按时间戳自动兜底(模型没给或给错时)
         for s in sections:
             fr = s.get("frame")
             if not fr or str(fr).lower() in ("null", "none", ""):
                 s["frame"] = pick_frame_for_ts(s.get("ts"), manifest)
+
+        # 3.6 质量闸门③：二次审核（逐条回溯出处，清幻觉）
+        audit_report = []
+        if sections and not args.no_audit:
+            print("[3.6/4] 二次审核：逐条核对知识点出处 ...")
+            sections, audit_report = audit_notes(
+                sections, args.llm_base, args.api_key, args.llm_model,
+                segs, strict=getattr(args, "audit_strict", False))
+            if not audit_report:
+                print("      全部知识点均能在原文找到出处")
 
         if not failed and sections:
             try:
@@ -895,13 +1293,38 @@ def process_one(video, out, args):
     if not mindmap_text:
         mindmap_text = "* 内容\n  * " + (sections[0].get("heading", base) if sections else base)
 
+    # 3.9 质量报告落盘：纠错明细 + 审核结论，便于人工复核（也是"可追溯"的凭证）
+    if asr_report or audit_report:
+        try:
+            rp = os.path.join(out, "审核报告.txt")
+            with open(rp, "w", encoding="utf-8") as f:
+                f.write(f"# 质量报告 · {title}\n")
+                f.write(f"生成时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                f.write(f"## 一、ASR 术语校正（{len(asr_report)} 处）\n")
+                if asr_report:
+                    for a, b in asr_report:
+                        f.write(f"- 原: {a}\n  改: {b}\n")
+                else:
+                    f.write("（无）\n")
+                f.write(f"\n## 二、二次审核（{len(audit_report)} 条待复核）\n")
+                if audit_report:
+                    for line in audit_report:
+                        f.write(f"- {line}\n")
+                else:
+                    f.write("全部知识点均能在逐字稿中找到出处。\n")
+            print(f"  [OK] 审核报告.txt ({len(asr_report)} 处校正 / "
+                  f"{len(audit_report)} 条审核记录)")
+        except Exception as e:
+            print(f"  [!] 审核报告写入失败: {e}")
+
     # 4. 组装
     print("[4/4] 组装笔记包 ...")
     # HTML 是核心交付物，始终生成（左视频 + 右图文笔记，含 deepdive/code）
     try:
         make_html(os.path.join(out, "index.html"),
                   video_src_for_html(video, out), title, intro, sections,
-                  summary_table, quiz, vision_used=vision_used)
+                  summary_table, quiz, vision_used=vision_used,
+                  asr_report=asr_report, audit_report=audit_report)
         print("  [OK] index.html (核心交付)")
     except Exception as e:
         print("  [!] html 失败:", e)
@@ -940,7 +1363,7 @@ def process_one(video, out, args):
         print("  [i] --all-formats: 已额外生成 笔记.md / 笔记.docx / 笔记.pptx / 思维导图.mm")
 
     print("  [OK] 产物:")
-    keep = ["index.html", "逐字稿.txt"]
+    keep = ["index.html", "逐字稿.txt", "逐字稿-校正.txt", "审核报告.txt"]
     if getattr(args, "all_formats", False):
         keep += ["笔记.md", "笔记.docx", "笔记.pptx", "思维导图.mm"]
     for f in keep:
@@ -1008,6 +1431,14 @@ def main():
     ap.add_argument("--max-tokens", type=int, default=LLM_MAX_TOKENS,
                     help="单次大模型输出上限(调大=笔记更详细, 本机上下文16384内建议<=6000)")
     ap.add_argument("--no-llm", action="store_true", help="跳过本地大模型(仅转写+截图)")
+    ap.add_argument("--no-asr-fix", action="store_true",
+                    help="跳过 ASR 音近错字校正（默认开启：先把转写稿错字改对，再交给总结，避免错词带偏）")
+    ap.add_argument("--no-audit", action="store_true",
+                    help="跳过二次审核（默认开启：生成后按时间戳回捞原文，逐条核对知识点是否有出处）")
+    ap.add_argument("--audit-strict", action="store_true",
+                    help="审核严格模式：找不到出处的知识点直接删除（默认只加 ⚠️ 标记，尽量不丢内容）")
+    ap.add_argument("--temperature", type=float, default=LLM_TEMPERATURE,
+                    help="大模型温度，默认 0.2（越低越照稿念、越少编造；想更有发散可调 0.4~0.6）")
     ap.add_argument("--no-recursive", action="store_true", help="文件夹模式不递归子目录")
     ap.add_argument("--reuse", action="store_true",
                     help="复用输出目录里已有的逐字稿.txt与截图, 跳过抽帧/转写(调提示词时快速重跑)")
