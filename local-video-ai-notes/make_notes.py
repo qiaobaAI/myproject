@@ -30,7 +30,7 @@ WHISPER_MODEL_DEFAULT = "base"
 WHISPER_MODELS_DIR = os.path.join(SCRIPT_DIR, "models")  # 本地预置的 whisper 模型目录
 LLM_BASE_URL = "http://localhost:8000/v1"
 LLM_MODEL = "Qwen3-30B-A3B-Q4_K_M"
-LLM_MAX_TOKENS = 7000  # 放开输出长度上限(含 deepdive/code 扩展内容); 本机上下文16384, 7000级安全
+LLM_MAX_TOKENS = 8192  # 单次大模型输出上限; 本机上下文30B=32768/35B=16384, 8192级安全(更长=笔记更详细)
 FRAME_INTERVAL = 30  # 秒：每隔多少秒抽一帧
 CHUNK_TOKENS = 5000  # 转写稿超过此估算 token 数则分块总结
 
@@ -209,7 +209,7 @@ def _transcribe_try(video, model, device, timeout):
     t.start()
     t.join(timeout)
     if t.is_alive():
-        raise RuntimeError(f"{device} 模式 {timeout}s 内无响应（疑似 CUDA 卡死），已中断本次尝试")
+        raise RuntimeError(f"{device} 模式 {timeout}s 内无响应（疑似卡死/资源不足/时长远超预算），已中断本次尝试")
     status, *rest = res.get()
     if status == "err":
         raise RuntimeError(rest[0])
@@ -224,13 +224,24 @@ def transcribe(video, model, device="cpu", cuda_timeout=120):
     # cublas64_12.dll；若系统只有 CUDA 13（如 50 系新卡 610+ 驱动）则缺此文件，
     # CUDA 模式会报错或卡死。但**若用户系统装了 CUDA 12**，则 --device cuda 可正常加速。
     # 因此默认走 CPU，仅当用户显式 --device cuda 才试 GPU，失败/超时自动回退 CPU。
+    # 看门狗预算：长视频（几十分钟~几小时）转写本就需要很久，绝不能用固定 120s，否则一律被杀
+    # （之前 35 个视频里只有第 1 个 75 秒短视频能跑完，其余全失败就是这个原因）。
+    # 按视频时长给充足预算：假设最坏 2 倍实时（compute<=dur/2），再加 5 分钟模型加载/余量；
+    # join 会在正常完成时立即返回，看门狗只在真卡死时兜底，不会拖慢任何正常任务。
+    try:
+        dur, _, _ = get_meta(video)
+    except Exception:
+        dur = 0.0
+    cpu_timeout = max(900, int(dur / 2 + 300))
     if device == "cuda":
+        # 显式走 GPU 时同样按时长给预算；若 CUDA 真正不可用通常会立即抛异常（很快回退 CPU），
+        # 只有“卡死”才会走到完整预算才超时。
         try:
-            return _transcribe_try(video, model, "cuda", cuda_timeout)
+            return _transcribe_try(video, model, "cuda", cpu_timeout)
         except Exception as e:
             print(f"  [Whisper] CUDA 失败({e})，回退 CPU ...")
             device = "cpu"
-    return _transcribe_try(video, model, "cpu", cuda_timeout)
+    return _transcribe_try(video, model, "cpu", cpu_timeout)
 
 
 def build_transcript(segs):
@@ -1558,7 +1569,7 @@ def main():
     ap.add_argument("--api-key", default="local")
     ap.add_argument("--frame-interval", type=int, default=FRAME_INTERVAL)
     ap.add_argument("--max-tokens", type=int, default=LLM_MAX_TOKENS,
-                    help="单次大模型输出上限(调大=笔记更详细, 本机上下文16384内建议<=6000)")
+                    help="单次大模型输出上限(调大=笔记更详细; 30B上下文32768/35B上下文16384, 默认8192)")
     ap.add_argument("--no-llm", action="store_true", help="跳过本地大模型(仅转写+截图)")
     ap.add_argument("--no-asr-fix", action="store_true",
                     help="跳过 ASR 音近错字校正（默认开启：先把转写稿错字改对，再交给总结，避免错词带偏）")
