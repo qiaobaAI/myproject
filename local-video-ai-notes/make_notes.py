@@ -16,6 +16,7 @@ import os
 import re
 import sys
 import subprocess
+import tempfile
 import time
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -218,29 +219,104 @@ def _transcribe_try(video, model, device, timeout):
     return out
 
 
-def transcribe(video, model, device="cpu", cuda_timeout=120):
+# ---------------------------------------------------------------------------
+# whisper.cpp (GPU / CUDA 13.3) 转录后端
+# faster-whisper 依赖 ctranslate2 的 cublas64_12.dll，本机只有 CUDA 13.3
+# (cublas64_13)，GPU 用不了。whisper.cpp 自带 ggml 的 CUDA kernel，只依赖 CUDA
+# 工具包运行时，因此能在 RTX 5070(CUDA 13.3, arch=120) 上跑 GPU 转写，速度快
+# 一个数量级。产物 SRT 解析后与 faster-whisper 同结构 segs，下游管线零改动。
+# ---------------------------------------------------------------------------
+def find_whispercpp_cli():
+    """定位 tools/whispercpp 下编译出的 whisper-cli.exe；找不到返回 None。"""
+    cands = [
+        os.path.join(SCRIPT_DIR, "tools", "whispercpp", "build", "bin", "Release", "whisper-cli.exe"),
+        os.path.join(SCRIPT_DIR, "tools", "whispercpp", "build", "bin", "whisper-cli.exe"),
+    ]
+    for c in cands:
+        if os.path.isfile(c):
+            return c
+    return None
+
+
+def transcribe_gpu_whispercpp(video, model_path, cli, language="zh", threads=None):
+    """用 whisper.cpp (GPU) 转写，返回 segs[{start,end,text}]。
+    whisper-cli 原生只认 flac/mp3/ogg/wav，mp4 等先用自带 ffmpeg 抽 16k 单声道 wav。"""
+    if threads is None:
+        try:
+            threads = max(1, (os.cpu_count() or 8) // 2)
+        except Exception:
+            threads = 8
+    ffmpeg = os.path.join(SCRIPT_DIR, "tools", "ffmpeg", "bin", "ffmpeg.exe")
+    tmp_wav = os.path.join(tempfile.gettempdir(), f"whispercpp_{os.getpid()}.wav")
+    if os.path.isfile(ffmpeg):
+        rc = subprocess.run([ffmpeg, "-y", "-i", video, "-vn", "-ac", "1",
+                             "-ar", "16000", tmp_wav],
+                            capture_output=True, text=True,
+                            encoding="utf-8", errors="replace")
+        if rc.returncode != 0 or not os.path.isfile(tmp_wav):
+            raise RuntimeError("ffmpeg 抽取音频失败:\n" + (rc.stderr or "")[-1500:])
+        audio = tmp_wav
+    else:
+        audio = video  # 退而求其次直接喂（仅对 wav/flac/mp3/ogg 有效）
+    out_base = os.path.join(tempfile.gettempdir(), f"whispercpp_out_{os.getpid()}")
+    cmd = [cli, "-m", model_path, "-f", audio, "-osrt", "-of", out_base,
+           "-t", str(threads), "-p", "1", "-l", language]
+    # 运行环境：把 whisper-cli 所在目录(ggml DLL) 与 CUDA 运行时 bin 放进 PATH，
+    # 避免缺 ggml-cuda.dll / cudart64_13.dll。
+    env = os.environ.copy()
+    extra = [os.path.dirname(cli)]
+    cuda_root = os.environ.get("CUDA_PATH", r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3")
+    # 运行时 DLL(cublas64_13.dll/cudart64_13.dll 等)在 bin\x64 下，bin 目录通常没有。
+    for sub in ("bin\\x64", "bin"):
+        cuda_bin = os.path.join(cuda_root, sub)
+        if os.path.isdir(cuda_bin):
+            extra.append(cuda_bin)
+    env["PATH"] = ";".join(extra) + ";" + env.get("PATH", "")
+    print(f"  [whisper.cpp] GPU/CUDA 转写: {os.path.basename(cli)} "
+          f"model={os.path.basename(model_path)} lang={language}")
+    r = subprocess.run(cmd, capture_output=True, text=True, env=env,
+                       encoding="utf-8", errors="replace")
+    srt_path = out_base + ".srt"
+    try:
+        if not os.path.isfile(srt_path):
+            raise RuntimeError("whisper.cpp 未生成 .srt:\n" + (r.stderr or r.stdout or "")[-2000:])
+        with open(srt_path, encoding="utf-8", errors="replace") as f:
+            srt = f.read()
+        segs = parse_subtitle_text(srt)
+        if not segs:
+            raise RuntimeError("whisper.cpp 输出解析为空（SRT 为空或格式异常）")
+        return segs
+    finally:
+        for p in (srt_path, tmp_wav):
+            try:
+                if os.path.isfile(p):
+                    os.remove(p)
+            except Exception:
+                pass
+
+
+def transcribe(video, model, device="cuda"):
+    """转写入口：默认优先 whisper.cpp (GPU, CUDA 13.3)；不可用时回退 faster-whisper(CPU)。
+    - device="cuda"/"gpu"/"auto": 尝试 whisper.cpp GPU；缺失或失败则回退 CPU。
+    - device="cpu": 强制 faster-whisper CPU（最稳，无需 CUDA）。"""
+    if device in ("cuda", "gpu", "auto"):
+        cli = find_whispercpp_cli()
+        cpp_model = os.environ.get("WHISPER_CPP_MODEL") or os.path.join(
+            SCRIPT_DIR, "tools", "whispercpp", "models", "ggml-base.bin")
+        if cli and os.path.isfile(cpp_model):
+            try:
+                return transcribe_gpu_whispercpp(video, cpp_model, cli, language="zh")
+            except Exception as e:
+                print(f"  [Whisper] whisper.cpp(GPU) 失败({e})；回退 faster-whisper CPU ...")
+        else:
+            print("  [Whisper] 未找到 whisper.cpp 二进制或模型，回退 faster-whisper CPU ...")
+    # 回退 / 显式 CPU：faster-whisper
     model = resolve_whisper_model(model)
-    # 默认 CPU（最稳）：faster-whisper 底层的 ctranslate2 预编译版要 CUDA 12 的
-    # cublas64_12.dll；若系统只有 CUDA 13（如 50 系新卡 610+ 驱动）则缺此文件，
-    # CUDA 模式会报错或卡死。但**若用户系统装了 CUDA 12**，则 --device cuda 可正常加速。
-    # 因此默认走 CPU，仅当用户显式 --device cuda 才试 GPU，失败/超时自动回退 CPU。
-    # 看门狗预算：长视频（几十分钟~几小时）转写本就需要很久，绝不能用固定 120s，否则一律被杀
-    # （之前 35 个视频里只有第 1 个 75 秒短视频能跑完，其余全失败就是这个原因）。
-    # 按视频时长给充足预算：假设最坏 2 倍实时（compute<=dur/2），再加 5 分钟模型加载/余量；
-    # join 会在正常完成时立即返回，看门狗只在真卡死时兜底，不会拖慢任何正常任务。
     try:
         dur, _, _ = get_meta(video)
     except Exception:
         dur = 0.0
     cpu_timeout = max(900, int(dur / 2 + 300))
-    if device == "cuda":
-        # 显式走 GPU 时同样按时长给预算；若 CUDA 真正不可用通常会立即抛异常（很快回退 CPU），
-        # 只有“卡死”才会走到完整预算才超时。
-        try:
-            return _transcribe_try(video, model, "cuda", cpu_timeout)
-        except Exception as e:
-            print(f"  [Whisper] CUDA 失败({e})，回退 CPU ...")
-            device = "cpu"
     return _transcribe_try(video, model, "cpu", cpu_timeout)
 
 
@@ -1563,7 +1639,13 @@ def main():
     ap.add_argument("--queue", default=None, help="路径列表文件：每行一个视频/文件夹路径，# 开头为注释，空行忽略")
     ap.add_argument("--out", default=None, help="输出目录（文件夹模式时作为根目录，保留子目录结构）")
     ap.add_argument("--whisper-model", default=WHISPER_MODEL_DEFAULT)
-    ap.add_argument("--device", default="cpu", help="whisper 转写设备: cpu / cuda。默认 cpu 最稳；若你的系统装了 CUDA 12(toolkit v12.x) 可改 cuda 加速")
+    ap.add_argument("--whisper-cpp-model",
+                    default=os.path.join(SCRIPT_DIR, "tools", "whispercpp", "models", "ggml-small.bin"),
+                    help="whisper.cpp(GPU) 用的 ggml 模型路径；默认 tools/whispercpp/models/ggml-small.bin"
+                         " (准确率优先，实测 ~33x 实时率)。追求极致速度可用 ggml-base.bin (~52x)。")
+    ap.add_argument("--device", default="cuda",
+                    help="whisper 转写设备: cuda / cpu。默认 cuda=优先用 whisper.cpp(GPU, CUDA13.3) 加速，"
+                         "缺失或失败自动回退 faster-whisper CPU；cpu=强制 CPU 最稳")
     ap.add_argument("--llm-base", default=LLM_BASE_URL)
     ap.add_argument("--llm-model", default=LLM_MODEL)
     ap.add_argument("--api-key", default="local")
@@ -1601,6 +1683,9 @@ def main():
                         "跳过抽帧与转写，仅用大模型做总结并生成 index.html。"
                         "也可用 run.bat 直接拖入字幕 .txt（会自动识别为字幕而非队列）")
     args = ap.parse_args()
+
+    # 把 whisper.cpp 模型路径透传给 transcribe()（其内部读 WHISPER_CPP_MODEL 环境变量）
+    os.environ["WHISPER_CPP_MODEL"] = os.path.abspath(args.whisper_cpp_model)
 
     out_root = os.path.abspath(args.out) if args.out else os.path.join(SCRIPT_DIR, "output")
 

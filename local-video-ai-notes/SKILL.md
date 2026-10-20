@@ -16,13 +16,13 @@ description: 帮用户在本地从零搭建"视频 → AI 富笔记"工具（本
 ```
 视频
  ├─ ffmpeg 抽关键帧 ──────────► 截图/  (HTML内嵌 + 视觉OCR用)
- ├─ faster-whisper(本地CPU)听音轨 ─► 逐字稿.txt(带时间戳)
+ ├─ whisper.cpp(GPU/CUDA)听音轨 ─► 逐字稿.txt(带时间戳)  ← 失败自动回退 faster-whisper(CPU)
  ├─ [可选] 视觉模型(35B)看帧OCR ─► 画面识别.txt (无声/纯录屏救命)
  └─ 本地 llama-server(OpenAI兼容) 总结 ─► 结构化JSON ─► 组装
         └─ index.html(默认) + 可选 md/docx/pptx/思维导图
 ```
 
-三个本地环节，互不依赖云：**ffmpeg**（独立二进制）、**faster-whisper**（本地模型）、**本地大模型服务**（任意 OpenAI 兼容，默认 `http://localhost:8000/v1`）。
+三个本地环节，互不依赖云：**ffmpeg**（独立二进制）、**whisper.cpp GPU / faster-whisper CPU 回退**（本地模型）、**本地大模型服务**（任意 OpenAI 兼容，默认 `http://localhost:8000/v1`）。
 
 ---
 
@@ -30,17 +30,20 @@ description: 帮用户在本地从零搭建"视频 → AI 富笔记"工具（本
 
 | 文件 | 说明 | 是否入库 |
 |---|---|---|
-| `make_notes.py` | 核心流水线（~1100 行，纯标准库 + 惰性导入第三方） | ✅ 必须 |
-| `run.bat` | Windows 启动器，**必须 GBK+CRLF**（见命门2） | ✅ 必须 |
+| `make_notes.py` | 核心流水线（~1200 行，纯标准库 + 惰性导入第三方） | ✅ 必须 |
+| `run.bat` | Windows 启动器，**纯 ASCII + CRLF**（免疫 GBK/UTF-8 差异；CRLF 必须有，见命门2） | ✅ 必须 |
 | `run.sh` | macOS/Linux 启动器（**必须 LF**，拖拽/命令行） | ✅ 必须 |
 | `requirements.txt` | faster-whisper / python-docx / python-pptx / requests | ✅ 必须 |
 | `README.md` | 完整搭建 + 八个坑 | ✅ 必须 |
 | `SKILL.md` | 本文件 | ✅ 必须 |
 | `docs/llama-setup.md` | 作者真实大模型环境总结（llama.cpp CUDA13.3 构建/启动器/模型） | ✅ 建议带 |
+| `docs/whisper-cuda.md` | **GPU 转写**：为什么用 whisper.cpp、编译步骤、实测速度、DLL 坑 | ✅ 必须 |
+| `scripts/build_whisper_cuda.bat` / `.sh` | 编译 whisper.cpp 的脚本（Windows 走 vcvars64，Linux 走 Ninja） | ✅ 必须 |
 | `skills/story-taught-tech-new/` | 知识讲解 skill（笔记"类比讲原理"的能力来源） | ✅ 建议带 |
 | `.gitignore` | 排除大文件 | ✅ 必须 |
 | `tools/ffmpeg/` | ffmpeg 二进制(400MB+) | ❌ 忽略，用户自行下载 |
-| `models/` | whisper 模型(200MB+) | ❌ 忽略，用户自行下载 |
+| `tools/whispercpp/` | whisper.cpp 源码 + 编译产物 + ggml 模型(数百 MB) | ❌ 忽略，用户自行编译 |
+| `models/` | faster-whisper 模型(200MB+) | ❌ 忽略，用户自行下载 |
 | `.venv/` `output/` `*.log` | 环境/产物/日志 | ❌ 忽略 |
 
 > **不要往 git 里塞大文件**：ffmpeg、whisper 模型、.venv、output 都靠 README 指引用户本地准备。
@@ -53,12 +56,14 @@ description: 帮用户在本地从零搭建"视频 → AI 富笔记"工具（本
 
 1. **Python 隔离环境**：**用 3.11 / 3.12**（3.13 偏新，ctranslate2 可能无 wheel）；`python -m venv .venv` → 激活 → `pip install -r requirements.txt`。
 2. **ffmpeg**：下载解压到 `tools/ffmpeg/bin/ffmpeg.exe`（或 macOS/Linux 的 `ffmpeg`），或加入系统 PATH。
-3. **whisper 模型**：在 `models/` 下用 huggingface-cli 走镜像下放（**别直连 HF**，见命门3）：
-   ```bash
-   pip install -U "huggingface_hub[cli]"
-   set HF_ENDPOINT=https://hf-mirror.com     # macOS/Linux: export HF_ENDPOINT=https://hf-mirror.com
-   huggingface-cli download Systran/faster-whisper-base --local-dir models/faster-whisper-base
-   ```
+3. **转写引擎**（二选一，推荐 A）：
+   - **A（推荐，GPU）whisper.cpp**：`git clone --depth 1 https://github.com/ggml-org/whisper.cpp tools/whispercpp` → 跑 `scripts/build_whisper_cuda.bat` → 下 `ggml-small.bin` 到 `tools/whispercpp/models/`。详见 `docs/whisper-cuda.md`。CUDA 12/13 都能跑，比 CPU 快 5~15 倍。
+   - **B（回退，CPU）faster-whisper**：没编 whisper.cpp 时自动用它；模型放 `models/` 下（**别直连 HF**，见命门3）：
+     ```bash
+     pip install -U "huggingface_hub[cli]"
+     set HF_ENDPOINT=https://hf-mirror.com     # macOS/Linux: export HF_ENDPOINT=https://hf-mirror.com
+     huggingface-cli download Systran/faster-whisper-base --local-dir models/faster-whisper-base
+     ```
 4. **本地大模型**：起一个 OpenAI 兼容服务监听 `localhost:8000`（llama.cpp/ollama 均可）。笔记用 30B 级文本模型；无声视频 OCR 需带视觉的 35B。大模型文件用魔搭/hf-mirror 下（见 README 3.6 / docs/llama-setup.md 第四节）。
 5. **运行**：Windows 拖视频到 `run.bat`；macOS/Linux 用 `./run.sh` 或直接 `python make_notes.py "<视频或文件夹>"`。加 `--reuse` 调提示词秒重跑；`--vision` 强制视觉 OCR；`--all-formats` 补四种格式。
 
@@ -72,15 +77,16 @@ description: 帮用户在本地从零搭建"视频 → AI 富笔记"工具（本
 - `--frame-interval 15`：抽帧间隔（默认 30）。
 - `--mirror-from "D:\baiduyunpan"`：输出目录从指定层级起镜像。
 - `--all-formats`：额外生成 md/docx/pptx/思维导图。
-- `--device cuda`：Whisper 强走 GPU（**新手禁用**，见命门1）。
+- `--device cuda|cpu`：转写设备，**默认 cuda**（先试 whisper.cpp GPU，失败自动回退 CPU）；`cpu` 强制 CPU。
+- `--whisper-cpp-model <路径>`：whisper.cpp 的 ggml 模型，默认 `tools/whispercpp/models/ggml-small.bin`（准）；可换 `ggml-base.bin`（快）。
 - `--llm-base / --llm-model / --vision-url / --vision-model`：接 ollama 或独立视觉端点。
 
 ---
 
 ## 五、🔥 命门（必踩，提前处理）
 
-**命门1 — Whisper 的 GPU 加速取决于系统 CUDA 版本**：ctranslate2 预编译版要 `cublas64_12.dll`。若系统只有 CUDA 13（50 系新卡 610+ 驱动，只有 `cublas64_13.dll`）→ 缺文件 → 必须 CPU（默认即 CPU，加线程超时兜底）。若系统装了 CUDA 12（有 `v12.x` 目录）→ 用 `--device cuda` 即可 GPU 加速。别照抄"必须 CPU"——有 CUDA 12 的用户不加这参数就是浪费显卡。
-**命门2 — bat 必须 GBK+CRLF**：cmd 默认 936(GBK)。UTF-8→中文乱码"不是内部或外部命令"；GBK 但 LF 行尾→命令从词中断（echo→'cho'）。生成用二进制 `("\r\n".join(lines)).encode("gbk")`，绝不用 `\n` 文本拼接。对应的 `run.sh` 则必须 LF，否则 macOS/Linux 报 "bad interpreter"。
+**命门1 — `cublas64_12.dll not found`（faster-whisper 的 GPU 门槛）**：ctranslate2 预编译版写死要 CUDA 12 的 `cublas64_12.dll`；50 系新卡（CUDA 13）只有 `cublas64_13.dll` → GPU 报错/卡死。**解法：换 whisper.cpp**（自带 CUDA kernel，CUDA 12/13 都行，见 `docs/whisper-cuda.md`）。本项目默认优先 whisper.cpp、失败自动回退 faster-whisper CPU，所以不会被卡死。注意：whisper.cpp 的产物在 `build/bin/`（不是 `build/` 根），且 CUDA 运行时 DLL 在 `CUDA\v13.3\bin\x64`（不在 `bin`）——缺 DLL 会 exit 127。
+**命门2 — bat 必须 CRLF（纯 ASCII 最稳）**：cmd 默认 936(GBK)。UTF-8→中文乱码"不是内部或外部命令"；GBK 但 LF 行尾→命令从词中断。**最省心的做法：bat 里全用英文/ASCII**（本仓库 `run.bat` 即如此），再用二进制 `("\r\n".join(lines))` 写 CRLF，彻底免疫编码问题。对应的 `run.sh` 必须 LF，否则报 "bad interpreter"。
 **命门3 — HF 大文件被代理截断**：直连下载模型变 0 字节/半截。whisper 模型用 `huggingface-cli download ... --local-dir` 并设 `HF_ENDPOINT=https://hf-mirror.com`；大模型(30B/35B)用魔搭或 hf-mirror + 迅雷/aria2c 拉，别用浏览器直连。脚本优先读本地 `models/`。
 **命门4 — 跨盘符**：视频 D:、输出 F: 时 `os.path.relpath` 抛错；`video_src_for_html()` 跨盘回退 `file://` 绝对路径。
 **命门5 — 路径带引号/`file://`**：用户从资源管理器复制路径常带 `"..."` 或 `file:///` 前缀；入口 `clean_input_path()` 去掉。

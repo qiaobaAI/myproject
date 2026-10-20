@@ -1,16 +1,27 @@
 # ===== 体积大 / 可自动重建，禁止入库 =====
+# ⚠️ .gitignore 不支持"行内注释"，注释必须单独成行，否则整行会被当成匹配模式而失效。
+
 .venv/
 __pycache__/
-tools/                 # ffmpeg 二进制(400MB+)，改由 README 指引下载
-models/                # whisper 模型(200MB+)。⚠️ 克隆后此目录为空，需按 README 步骤3 用 huggingface-cli 走镜像下放
-output/                # 用户自己生成的笔记，含私有视频截图
-sample/                # 本地测试产物
-test_full/             # 本地测试产物
+
+# ffmpeg 二进制(400MB+)，改由 README 指引下载
+# 同时覆盖 tools/whispercpp/（whisper.cpp 源码 + 编译产物 + ggml 模型，数百 MB）
+tools/
+
+# faster-whisper 模型(200MB+)。⚠️ 克隆后此目录为空，需按 README 步骤3 下载
+models/
+
+# 用户自己生成的笔记，含私有视频截图
+output/
+
+# 本地测试产物
+sample/
+test_full/
 
 # ===== 运行日志 / 临时文件 =====
 *.log
 run_*.log
-nul                   # 杂项的模型状态 JSON，非必需
+nul
 
 # ===== Python 通用 =====
 *.pyc

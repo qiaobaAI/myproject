@@ -24,6 +24,7 @@
 | 依赖 | 必须开会员 / 网盘客户端 | 一次性搭好，永久免费 |
 | 笔记深度 | 分节 + 截图 | 分节 + **生活类比讲底层原理** + **代码说明 + 真实代码框** + 知识小结表 + 自测题 |
 | 无声视频 | 基本失效 | 可接**视觉模型 OCR 画面文字**（代码/PPT/图表）继续出文本笔记 |
+| 转写速度 | 云端算力（受上传带宽限制） | **whisper.cpp + CUDA 走 GPU**，RTX 5070 实测 33~52x 实时率，2 小时视频约 4 分钟 |
 | 可定制 | 不可改 | 提示词、模型、抽帧间隔、输出格式**全可改** |
 | 输出格式 | 在线查看 | `index.html`（核心）+ 可选 md/docx/pptx/思维导图 |
 
@@ -38,7 +39,8 @@
   │
   ├─[ffmpeg] 按时间间隔抽关键帧 ──────────► 截图/  (供 HTML 内嵌 + 视觉OCR)
   │
-  ├─[faster-whisper, 本地CPU] 听音轨转写 ─► 逐字稿.txt (带时间戳)
+  ├─[whisper.cpp, GPU/CUDA] 听音轨转写 ───► 逐字稿.txt (带时间戳)
+  │    └─ 不可用时自动回退 faster-whisper(CPU)
   │
   ├─[可选] 视觉模型(35B)看关键帧 OCR ─────► 画面识别.txt (无声/纯录屏视频救命用)
   │
@@ -49,7 +51,8 @@
 
 三个本地环节，互不依赖云端：
 1. **抽帧**：ffmpeg（可独立下载，不需 pip）。
-2. **转写**：faster-whisper（本地模型，默认跑 CPU，原因见坑 1）。
+2. **转写**：优先 **whisper.cpp + CUDA（GPU，比 CPU 快 5~15 倍）**；不可用时自动回退 faster-whisper（CPU）。
+   为什么不用 faster-whisper 的 GPU、怎么编译，见 [`docs/whisper-cuda.md`](docs/whisper-cuda.md)。
 3. **总结**：你自己的 llama-server（`http://localhost:8000/v1`，任意 OpenAI 兼容后端都行）。
 
 ---
@@ -76,7 +79,8 @@
 - Whisper（CPU 转写）+ 系统本身：8GB 起步，16GB 舒适。
 
 ### 3.3 CPU / 指令集
-- Whisper 默认走 CPU 转写，靠多核：12 核以上很快（作者 6 分钟视频约 25 秒）；4 核以下会慢数倍。
+- **GPU 优先**：有 NVIDIA 显卡并编好 whisper.cpp，转写直接走 GPU（快 5~15 倍，见 [`docs/whisper-cuda.md`](docs/whisper-cuda.md)）。
+- **CPU 回退**：没 GPU / 编译失败时走 faster-whisper，靠多核：12 核以上很快（作者 6 分钟视频约 25 秒）；4 核以下会慢数倍。
 - 需支持 **AVX2**（近 10 年 x86 CPU 都支持）；极老 CPU（2013 年前）可能缺指令集，转写变慢或报错。
 
 ### 3.4 操作系统
@@ -85,9 +89,11 @@
 - **Apple Silicon Mac**：llama.cpp 用 metal 后端，统一内存（24/48/64GB）对大模型极友好（M3 Max 64GB 能跑 70B）；推荐 Qwen3-30B/32B Q4。
 
 ### 3.5 CUDA 版本（NVIDIA 用户关键，决定 Whisper 能否 GPU 加速）
-- faster-whisper 底层 `ctranslate2` 预编译版**要 CUDA 12 的 `cublas64_12.dll`**。
-  - 你系统**装了 CUDA 12**（老驱动 / 自己装了 toolkit）→ Whisper **可以 `--device cuda` 加速**，快很多！
-  - 你**只有 CUDA 13**（50 系新卡默认 610+ 驱动，只有 `cublas64_13.dll`）→ 缺 `cublas64_12` → **Whisper 必须 CPU**。
+- **推荐：用 whisper.cpp 做 GPU 转写**。它自带 ggml CUDA kernel，**CUDA 12 / 13 都能跑**，不挑 cublas 版本。
+  编一次约 20~40 分钟，之后转写快 5~15 倍。完整步骤见 [`docs/whisper-cuda.md`](docs/whisper-cuda.md)。
+- **回退：faster-whisper**（没编 whisper.cpp 时）。其底层 `ctranslate2` 预编译版要 **CUDA 12 的 `cublas64_12.dll`**：
+  - 系统**装了 CUDA 12**（老驱动 / 自装 toolkit）→ 可 `--device cuda` 加速；
+  - **只有 CUDA 13**（50 系新卡默认，只有 `cublas64_13.dll`）→ 缺 `cublas64_12` → 只能 CPU。
 - 自查：看 `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\` 下有没有 `v12.x` 目录。
 - llama.cpp 也要下**和你显卡/驱动匹配的 CUDA 构建**（CUDA 12.x / 13.x / ROCm / SYCL / metal / 纯 CPU），不是随便下。
 
@@ -104,7 +110,8 @@
 |---|---|---|
 | Python | **3.11 / 3.12 最稳**（ctranslate2 支持好）；3.13 偏新可能无对应 wheel | 务必用 venv 隔离 |
 | ffmpeg | 独立二进制，放 `tools/ffmpeg/bin/` 或系统 PATH | 不需 pip |
-| faster-whisper | 本地转写，默认 CPU | 有 CUDA 12 可 `--device cuda` 加速 |
+| whisper.cpp（可选，推荐） | GPU 转写引擎（whisper-cli.exe），需自行编译 | CUDA 12/13 均可；见 `docs/whisper-cuda.md` |
+| faster-whisper | CPU 转写（whisper.cpp 不可用时的回退） | 有 CUDA 12 可 `--device cuda` 加速 |
 | 本地大模型 | 任意 OpenAI 兼容服务（llama.cpp / ollama / vllm），监听 8000 | 见 3.6 |
 
 > 📁 **作者的真实环境（供参考，不必照搬）**：RTX 5070 12GB / CUDA 13.3 / Ryzen 9 9900X 12 核 / 47GB RAM；llama.cpp **CUDA 13.3 构建（build 9828）** + 自写 `启动大模型.bat` 菜单（先选 35B/30B 再选模式）+ Qwen3-30B-A3B Q4_K_M（笔记）与 Qwen3.6-35B-A3B Q2_K_P（OCR）。**你只要有任意 OpenAI 兼容本地服务监听 `localhost:8000` 就能跑**，完整总结见 [`docs/llama-setup.md`](docs/llama-setup.md)。
@@ -125,8 +132,20 @@ pip install -r requirements.txt
 - 下载 [ffmpeg](https://www.gyan.dev/ffmpeg/builds/)（Windows essentials 版），解压。
 - 放到 `tools/ffmpeg/`（使 `tools/ffmpeg/bin/ffmpeg.exe` 存在），或把 bin 目录加入系统 PATH。
 
-### 3. 放好 whisper 模型（听音轨转写用）
-- 脚本会**优先用本地 `models/faster-whisper-<name>/` 目录**（需含 `model.bin`）；没有才让 faster-whisper 自己下载（国内可能被墙，见坑 3）。
+### 3. 放好转写模型（听音轨用）
+
+**方案 A（推荐，GPU）：whisper.cpp**
+- 按 [`docs/whisper-cuda.md`](docs/whisper-cuda.md) 编译出 `whisper-cli.exe`，并把 `ggml-small.bin` 放到 `tools/whispercpp/models/`。
+  一句话版：
+  ```bat
+  git clone --depth 1 https://github.com/ggml-org/whisper.cpp tools\whispercpp
+  scripts\build_whisper_cuda.bat
+  curl -L -o tools\whispercpp\models\ggml-small.bin https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
+  ```
+- 脚本会自动优先用它，转写走 GPU，快 5~15 倍。
+
+**方案 B（回退，CPU）：faster-whisper**
+- 没编 whisper.cpp 时自动回退到它。脚本会**优先用本地 `models/faster-whisper-<name>/` 目录**（需含 `model.bin`）；没有才让 faster-whisper 自己下载（国内可能被墙，见坑 3）。
 - **推荐用 huggingface-cli 走镜像一次下好**（命令在激活的 venv 里执行）：
   ```bash
   pip install -U "huggingface_hub[cli]"
@@ -134,7 +153,7 @@ pip install -r requirements.txt
   huggingface-cli download Systran/faster-whisper-base --local-dir models/faster-whisper-base
   huggingface-cli download Systran/faster-whisper-tiny --local-dir models/faster-whisper-tiny
   ```
-  > 这两条命令会把 `model.bin` / `config.json` / `tokenizer*` 等整套文件落到 `models/faster-whisper-base/` 下，脚本可直接识别。只想用 base 就下 base 即可（默认用它）。
+  > 这两条命令会把 `model.bin` / `config.json` / `tokenizer*` 等整套文件落到 `models/faster-whisper-base/` 下，脚本可直接识别。
 
 ### 4. 启动本地大模型服务
 - 用你自己的方式起一个 OpenAI 兼容服务，监听 `http://localhost:8000/v1`。
@@ -228,7 +247,8 @@ index.html        ← 核心交付，浏览器打开，左视频右笔记
 | `--all-formats` | 额外生成 笔记.md/docx/pptx/思维导图.mm。 |
 | `--no-llm` | 只做抽帧+转写，不调大模型（调试用）。 |
 | `--dry-run` | **大文件夹专用**：只扫描并列出将要处理的视频清单+数量，不调 Whisper/LLM。丢 200G 大目录前先跑它预览，确认没误抓软件自带视频。找到 >50 个视频会自动提示用本参数；>300 个会要求 y/N 确认。 |
-| `--device cuda` | 强制 Whisper 走 GPU（**新手别用**，见坑 1）。 |
+| `--device cuda` / `--device cpu` | 转写设备。**默认 `cuda`**：先试 whisper.cpp(GPU)，失败自动回退 CPU；`--device cpu` 强制 CPU。 |
+| `--whisper-cpp-model <路径>` | 指定 whisper.cpp 的 ggml 模型，默认 `tools/whispercpp/models/ggml-small.bin`（准确优先）；想更快可换 `ggml-base.bin`。 |
 | `--llm-base / --llm-model` | 改大模型端点 / 模型名（接 ollama 等时用）。 |
 | `--transcript <file> [file2 ...]` | **纯字幕/逐字稿模式**：直接传入 `.txt`（支持 whisper/SRT/LRC/纯文本），跳过抽帧与转写，仅用大模型做总结生成 `index.html`；拖入字幕 `.txt` 也会自动识别。 |
 | `--vision-url / --vision-model` | 视觉 OCR 用独立端点（如另起 35B 于 8001）。 |
@@ -239,14 +259,13 @@ index.html        ← 核心交付，浏览器打开，左视频右笔记
 
 这些是本工具从 0 到 1 全部踩过的真坑，按坑处理就不会走弯路：
 
-### 坑 1：faster-whisper 的 GPU 加速取决于你系统的 CUDA 版本
-- **现象**：`cublas64_12.dll not found` 或直接卡死。
-- **原因**：faster-whisper 底层 `ctranslate2` 预编译版**要 CUDA 12 的 `cublas64_12.dll`**。
-- **两种情况（别照抄"必须 CPU"）**：
-  - 你系统**只有 CUDA 13**（50 系新卡 610+ 驱动，只有 `cublas64_13.dll`）→ 缺文件 → **必须 CPU**（本工具默认即 CPU，正是为此；作者 12 核 CPU 转写 6 分钟视频约 25 秒，可接受）。
-  - 你系统**装了 CUDA 12**（老驱动 / 自备 toolkit，有 `v12.x` 目录）→ 直接 **`--device cuda`** 就能 GPU 加速，转写快很多。
-- **自查**：看 `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\` 下是否有 `v12.x`。
-- **结论**：默认 CPU 最稳；有 CUDA 12 的用户务必加 `--device cuda` 提速，否则白白浪费显卡。
+### 坑 1：`cublas64_12.dll not found` —— faster-whisper 的 GPU 门槛
+- **现象**：`--device cuda` 报 `cublas64_12.dll not found` 或直接卡死。
+- **原因**：`ctranslate2` 预编译 wheel 写死要 **CUDA 12 的 `cublas64_12.dll`**；而 50 系新卡（CUDA 13）只有 `cublas64_13.dll`。
+- **解决**：**换 whisper.cpp**（自带 CUDA kernel，CUDA 12/13 都能跑）→ 见 [`docs/whisper-cuda.md`](docs/whisper-cuda.md)。
+  本项目**默认就优先 whisper.cpp，失败自动回退 faster-whisper CPU**，所以你不会被这个卡死。
+- **不想编译的临时折中**：有 CUDA 12 就给 faster-whisper 加 `--device cuda`；只有 CUDA 13 就走 CPU（作者 12 核转写 6 分钟视频约 25 秒，可接受）。
+- **实测收益**：换 whisper.cpp 后，RTX 5070 上 74 秒音频：base 1.43 秒(~52x)、small 2.25 秒(~33x)，比 CPU 快 5~15 倍。
 
 ### 坑 2：Windows 的 `.bat` 必须 GBK + CRLF（缺一不可）
 - **现象 A（只有 UTF-8 编码）**：中文乱码，报"不是内部或外部命令"。
@@ -286,20 +305,25 @@ index.html        ← 核心交付，浏览器打开，左视频右笔记
 
 ```
 video-notes/
-├─ make_notes.py        ← 核心流水线（1088 行，纯标准库 + 惰性导入第三方）
-├─ run.bat              ← Windows 启动器（GBK+CRLF，拖拽即用）
-├─ requirements.txt     ← Python 依赖
+├─ make_notes.py        ← 核心流水线（纯标准库 + 惰性导入第三方）
+├─ run.bat              ← Windows 启动器（ASCII+CRLF，拖拽即用）
+├─ requirements.txt     ← Python 依赖（CPU 回退链）
 ├─ README.md            ← 你正在看的这份
 ├─ SKILL.md             ← WorkBuddy 技能卡：让你的 AI 助手读它能照着复刻
 ├─ docs/
-│   └─ llama-setup.md   ← 作者真实大模型环境（llama.cpp CUDA13.3 构建 + 启动器 + 模型）总结
+│   ├─ llama-setup.md   ← 作者真实大模型环境（llama.cpp CUDA13.3 + 启动器 + 模型）总结
+│   └─ whisper-cuda.md  ← ★ GPU 转写：为什么用 whisper.cpp、怎么编译、实测速度、DLL 坑
+├─ scripts/
+│   ├─ build_whisper_cuda.bat   ← Windows 一键编译 whisper.cpp(CUDA)
+│   └─ build_whisper_cuda.sh    ← Linux/macOS 编译脚本
 ├─ skills/
 │   └─ story-taught-tech-new/  ← 知识讲解 skill（笔记"类比讲原理"的能力来源，可让 AI 复用）
 ├─ examples/            ← 示例笔记（真实生成的 AQS 课程笔记：index.html + 截图/ + 逐字稿.txt）
 │   └─ assets/preview.png  ← README 顶部的效果图
 ├─ .gitignore           ← 排除 .venv/tools/models/output 等大文件
 ├─ tools/ffmpeg/        ← [需自己放] ffmpeg 二进制
-├─ models/              ← [需自己放] faster-whisper 模型
+├─ tools/whispercpp/    ← [需自己编] whisper.cpp 源码 → build/bin/whisper-cli.exe + models/ggml-*.bin
+├─ models/              ← [需自己放] faster-whisper 模型（CPU 回退用）
 └─ output/              ← [自动生成] 笔记产物
 ```
 

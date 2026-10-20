@@ -44,7 +44,7 @@
   <!-- ============ 架构图 ============ -->
   <div class="sec">
     <h2><span class="tag">架构</span> 组件架构图</h2>
-    <p class="note">四层结构：入口层 → 调度层 → 处理管道（核心）→ 产物层；右侧为本地依赖的引擎（ffmpeg / faster-whisper / llama-server）。</p>
+    <p class="note">四层结构：入口层 → 调度层 → 处理管道（核心）→ 产物层；右侧为本地依赖的引擎（ffmpeg / whisper.cpp(GPU) / llama-server）。</p>
     <svg viewBox="0 0 1000 660" role="img" aria-label="组件架构图">
       <defs>
         <marker id="ar" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
@@ -97,7 +97,7 @@
         <rect x="160" y="300" width="100" height="58" rx="9" fill="#eff6ff" stroke="#60a5fa"/>
         <text x="210" y="322" font-weight="700" fill="#1e3a8a">转写</text>
         <text x="210" y="340" fill="#1e40af">transcribe</text>
-        <text x="210" y="353" font-size="9.5" fill="#3730a3">faster-whisper</text>
+        <text x="210" y="353" font-size="9.5" fill="#3730a3">whisper.cpp</text>
 
         <rect x="276" y="300" width="108" height="58" rx="9" fill="#ecfeff" stroke="#22d3ee"/>
         <text x="330" y="320" font-weight="700" fill="#155e75">视觉OCR</text>
@@ -146,8 +146,8 @@
         <text x="860" y="124" font-size="9.5" text-anchor="middle" fill="#b45309">抽关键帧 · 本地二进制</text>
 
         <rect x="762" y="170" width="196" height="50" rx="9" fill="#fff" stroke="#f59e0b"/>
-        <text x="860" y="190" font-weight="700" text-anchor="middle" fill="#92400e">faster-whisper</text>
-        <text x="860" y="208" font-size="9.5" text-anchor="middle" fill="#b45309">语音→文字 · 默认 CPU</text>
+        <text x="860" y="190" font-weight="700" text-anchor="middle" fill="#92400e">whisper.cpp</text>
+        <text x="860" y="208" font-size="9.5" text-anchor="middle" fill="#b45309">语音→文字 · GPU/CUDA</text>
 
         <rect x="762" y="300" width="196" height="92" rx="9" fill="#fff" stroke="#f59e0b"/>
         <text x="860" y="322" font-weight="700" text-anchor="middle" fill="#92400e">llama-server :8000</text>
@@ -189,13 +189,13 @@
         <tr><td><b>main()</b></td><td>参数解析、路径清洗、计算输出目录（镜像输入路径，去盘符或按 <code>--mirror-from</code> 裁剪）、单文件/文件夹分流、<code>--dry-run</code> 预览、安全阈值提示（&gt;50 建议预览 / &gt;300 强制确认）。</td><td><code>clean_input_path</code><br><code>mirror_rel</code></td></tr>
         <tr><td><b>find_videos()</b></td><td>文件夹模式下按视频扩展名递归扫描，自动忽略代码/文档/安装包等非视频文件。</td><td><code>VIDEO_EXTS</code><br><code>--no-recursive</code></td></tr>
         <tr><td><b>get_meta + extract_frames</b></td><td>用 ffmpeg 取视频时长/分辨率，并按固定间隔抽取关键帧存到 <code>截图/</code>。</td><td><code>--frame-interval</code></td></tr>
-        <tr><td><b>transcribe</b></td><td>faster-whisper 本地语音转文字（<b>默认走 CPU</b>，因本机 CUDA13 缺 cublas64_12）。产出 <code>逐字稿.txt</code>。</td><td><code>--device cuda</code> 仅 CUDA12 有效<br><code>--reuse</code> 可跳过</td></tr>
+        <tr><td><b>transcribe</b></td><td>优先 <b>whisper.cpp + CUDA（GPU）</b>本地语音转文字，失败自动回退 faster-whisper(CPU)。产出 <code>逐字稿.txt</code>。</td><td><code>--device cuda/cpu</code><br><code>--whisper-cpp-model</code><br><code>--reuse</code> 可跳过</td></tr>
         <tr><td><b>vision_ocr</b></td><td><b>条件触发</b>：转写稿为空/极短 或 <code>--vision</code> 强制。让 35B 视觉模型「看」关键帧，OCR 出屏幕代码/PPT/文字，缓存 <code>画面识别.txt</code>。让无声视频也能出笔记。</td><td><code>call_vision</code><br><code>--vision-url</code></td></tr>
         <tr><td><b>llm_summary</b></td><td>把转写稿（超长则分块）+ 截图清单 + 视觉上下文发给 llama-server，结构化产出 sections / quiz / summary_table / deepdive（类比）/ code（代码说明）。</td><td>端点 <code>localhost:8000</code><br><code>--max-tokens</code></td></tr>
         <tr><td><b>llm_mindmap</b></td><td>基于章节大纲让模型生成思维导图文本（FreeMind 格式）。</td><td><code>make_mindmap_mm</code></td></tr>
         <tr><td><b>make_html（★核心）</b></td><td>始终生成。左栏视频/首帧、右栏图文笔记（导读→目录→要点→考点→生活类比→代码框→内嵌截图）。</td><td><code>index.html</code></td></tr>
         <tr><td><b>make_markdown / docx / pptx / mindmap_mm</b></td><td>仅 <code>--all-formats</code> 时额外生成四种格式；被 Office 占用时自动另存 <code>_new</code> 不丢文件。</td><td><span class="pill pill2">可选</span></td></tr>
-        <tr><td><b>外部引擎</b></td><td>ffmpeg（抽帧）、faster-whisper（转写）、llama-server（30B 笔记 / 35B 视觉，可双 server 分流 OCR）。</td><td>见 <code>docs/llama-setup.md</code></td></tr>
+        <tr><td><b>外部引擎</b></td><td>ffmpeg（抽帧）、whisper.cpp（GPU 转写，回退 faster-whisper）、llama-server（30B 笔记 / 35B 视觉，可双 server 分流 OCR）。</td><td>见 <code>docs/whisper-cuda.md</code> 与 <code>docs/llama-setup.md</code></td></tr>
       </tbody>
     </table>
   </div>
@@ -250,7 +250,7 @@
 
       <!-- 7 转写 -->
       <rect x="180" y="624" width="400" height="48" rx="10" fill="#eff6ff" stroke="#60a5fa"/>
-      <text x="380" y="653" font-size="12" text-anchor="middle" fill="#1e3a8a">⑦ faster-whisper 本地转写（默认 CPU）→ 逐字稿.txt</text>
+      <text x="380" y="653" font-size="12" text-anchor="middle" fill="#1e3a8a">⑦ whisper.cpp GPU 转写（快 5~15x）→ 逐字稿.txt</text>
 
       <!-- 8 判断 silent -->
       <rect x="180" y="700" width="400" height="56" rx="10" fill="#fef3c7" stroke="#f59e0b"/>

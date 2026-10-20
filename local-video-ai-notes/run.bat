@@ -11,18 +11,20 @@ echo   Also supports dropping a subtitle/transcript .txt (no ASR needed)
 echo ============================================
 
 set "IN=%~1"
+set "CALLED_WITH_ARG="
+if defined IN set "CALLED_WITH_ARG=1"
 if not defined IN (
     set /p "IN=Enter path of video / folder / subtitle .txt: "
 )
 if not defined IN (
     echo No path given, exit.
-    pause
+    if not defined CALLED_WITH_ARG pause
     exit /b 1
 )
 set "IN=%IN:"=%"
 if not exist "%IN%" (
     echo Path not found: "%IN%"
-    pause
+    if not defined CALLED_WITH_ARG pause
     exit /b 1
 )
 
@@ -48,4 +50,4 @@ if not "%RC%"=="0" (
     echo [OK] All done. Notes are in output\ , open index.html in browser.
 )
 echo ========== Press any key to exit ==========
-pause >nul
+if not defined CALLED_WITH_ARG pause >nul

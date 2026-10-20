@@ -3,8 +3,9 @@
 # ⚠️ Python 版本：建议 3.11 / 3.12（ctranslate2 官方 wheel 支持好）；
 #    3.13 偏新，可能暂无对应 wheel 导致编译失败，新手请用 3.11/3.12。
 # 注：av / numpy / ctranslate2 是 faster-whisper 的传递依赖，pip 会自动带，这里不强制锁版本。
+# 注：GPU 转写引擎 whisper.cpp 是独立二进制（whisper-cli.exe），不走 pip，见 docs/whisper-cuda.md。
 
-faster-whisper==1.2.1      # 本地语音转写（听视频音轨出逐字稿）
+faster-whisper==1.2.1      # CPU 转写（whisper.cpp 不可用时的回退；有 CUDA12 也可 GPU）
 python-docx==1.2.0         # 可选：--all-formats 时生成 笔记.docx
 python-pptx==1.0.2         # 可选：--all-formats 时生成 笔记.pptx
 requests==2.34.2           # 调本地 llama-server（OpenAI 兼容接口）
