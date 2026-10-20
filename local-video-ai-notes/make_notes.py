@@ -39,7 +39,10 @@ CHUNK_TOKENS = 5000  # 转写稿超过此估算 token 数则分块总结
 # 1) 温度：事实抽取要稳，越低越"照稿念"，越高越爱发挥编造
 LLM_TEMPERATURE = 0.2
 # 2) ASR 纠错：独立一步把音近错字改对，避免错词带偏后续总结
-ASR_FIX_CHUNK_CHARS = 2200   # 每块字符数(控制单次输入+输出预算，远低于 16384)
+ASR_FIX_CHUNK_CHARS = 2200   # 短稿逐行校对：每块字符数(控制单次输入+输出预算)
+ASR_FIX_LINE_LIMIT = 15000   # 转写稿字数在此以内走「逐行校对」(最准)；超过改走「术语映射表」(快 7 倍+)
+ASR_MAP_CHUNK_CHARS = 20000  # 术语映射模式：每块喂给模型的字符数
+ASR_MAP_MAX_ITEMS = 40       # 术语映射模式：每块最多让模型吐多少条映射
 # 3) 二次审核：按每节时间戳回捞原文，逐条核对知识点是否有出处
 AUDIT_WINDOW_SEC = 150       # 每节摘取「起始时间前后 N 秒」的原文送审，省 token 且更精准
 AUDIT_MAX_CHARS = 9000       # 单次审核输入上限，超了自动分批
@@ -635,6 +638,141 @@ def llm_summary(chunk_text, manifest_str, base_url, api_key, model,
 # ----------------------------------------------------------------------------
 # 3.5 质量闸门 ①：ASR 音近错字校正（独立一步，纯确定性改写）
 # ----------------------------------------------------------------------------
+def _split_blocks(text, chunk_chars):
+    """按字符数在行边界切块，保证 [mm:ss] 时间戳不会被拆散。"""
+    blocks, buf, cnt = [], [], 0
+    for ln in text.splitlines():
+        if cnt + len(ln) > chunk_chars and buf:
+            blocks.append("\n".join(buf))
+            buf, cnt = [], 0
+        buf.append(ln)
+        cnt += len(ln)
+    if buf:
+        blocks.append("\n".join(buf))
+    return blocks
+
+
+def _extract_term_map(transcript, base_url, api_key, model,
+                      chunk_chars=ASR_MAP_CHUNK_CHARS, timeout=900):
+    """长稿专用：让模型只吐「错词→正确词」映射表，不做全文重写。
+
+    为什么长稿不能逐行校对：2 小时视频有 6 万字，按 2200 字要切 29 块，
+    每块都得生成与输入等长的全文；30B 在这种"原样输出+行数不变"的任务上
+    经常多写少写行，触发"行数异常"白跑（实测 5 块里 2 块报废）。
+    改成只输出映射表后，输出量从几千 token 降到几百 token，调用次数也少
+    一个数量级，且不存在行数漂移问题。
+    """
+    blocks = _split_blocks(transcript, chunk_chars)
+    sys_p = (
+        "你是技术字幕校对员。输入是一段语音识别(ASR)生成的逐字稿，带 [mm:ss] 时间戳。\n"
+        "你的任务是：找出其中**明显被听错的技术名词/专有名词**，输出「错误写法 → 正确写法」的映射表。\n"
+        "严格规则：\n"
+        "1) 只输出 JSON，格式："
+        "{\"fixes\":[{\"wrong\":\"错误写法\",\"right\":\"正确写法\","
+        "\"context\":\"该错词所在那一行的原文片段\"}]}，不要任何解释、不要代码块围栏；\n"
+        "2) wrong 必须是逐字稿里**原样出现过**的片段，长度 2~10 个字/词，绝不能自己编；\n"
+        "3) context 必须从原文**逐字复制**（10~40 字，含该错词），用于定位；"
+        "这条最关键：只有带 context 的映射才会被采用；\n"
+        "4) 只列**确定听错**的，拿不准的一律不列；像 bin/site/results 这类本身也是合法英文单词的，"
+        "除非上下文明确是误听，否则不要列；\n"
+        f"5) 每块最多 {ASR_MAP_MAX_ITEMS} 条，按出现频率/重要性排序。\n"
+        "常见例子：Lilix→Linux、卖SQL→MySQL、U版兔→Ubuntu、啃斑达→Kibana、"
+        "技术站→技术栈、不熟→部署、克龙→克隆、竞相→镜像、日质→日志、次步→步骤。\n"
+    )
+    fixes = []
+    seen = set()
+    for i, blk in enumerate(blocks, 1):
+        try:
+            out = call_llm(base_url, api_key, model, sys_p,
+                           "请输出这段逐字稿的错词映射表：\n\n" + blk,
+                           timeout=timeout, max_tokens=2400, temperature=0.0)
+        except Exception as e:
+            print(f"      [!] 术语抽取第 {i}/{len(blocks)} 块失败，跳过: {e}")
+            continue
+        out = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", (out or "").strip()).strip()
+        j = extract_json(out)
+        items = (j or {}).get("fixes") if isinstance(j, dict) else None
+        got = 0
+        for it in (items or []):
+            if not isinstance(it, dict):
+                continue
+            w = str(it.get("wrong") or "").strip()
+            r = str(it.get("right") or "").strip()
+            ctx = str(it.get("context") or "").strip()
+            if not w or not r or w == r:
+                continue
+            if not (2 <= len(w) <= 12) or len(r) > 24:
+                continue
+            if w.startswith("[") or w.isdigit():   # 别去换时间戳/纯数字
+                continue
+            if w not in transcript:                # 模型编的、原文根本没有 → 丢弃
+                continue
+            if r in w:                             # 越改越短(如 Spring→Spri) → 可疑
+                continue
+            # context 必须能在原文里原样找到，否则说明模型在编，丢弃
+            if len(ctx) < 4 or ctx not in transcript:
+                if not _term_map_fallback_ok(w):
+                    continue
+                ctx = ""
+            key = (w, r, ctx)
+            if key in seen:
+                continue
+            seen.add(key)
+            fixes.append((w, r, ctx))
+            got += 1
+        print(f"      [{i}/{len(blocks)}] 术语抽取: 本块 +{got} 条，累计 {len(fixes)} 条")
+    return fixes
+
+
+# 本身是合法英文、却被 ASR "听错"的高频词：没有可信 context 时一律不动
+_TERM_MAP_STOPWORDS = {
+    "bin", "site", "sites", "results", "result", "reject", "sprint", "name", "names",
+    "history", "bean", "beans", "xml", "spring", "java", "sql", "class", "object",
+    "method", "type", "value", "string", "list", "map", "set", "get", "test", "code",
+    "file", "data", "log", "index", "order", "user", "time", "true", "false", "null",
+    "and", "for", "the", "new", "public", "static", "void", "int", "try", "catch",
+}
+
+
+def _term_map_fallback_ok(w):
+    """没有可信 context 时的兜底判定：只有足够"不像正常英文"的词才允许全局替换。"""
+    if w.lower() in _TERM_MAP_STOPWORDS:
+        return False
+    if re.search(r"[\u4e00-\u9fff]", w):   # 含中文 → 可以全局替换
+        return True
+    return len(w) >= 6                     # 纯英文要足够长，短词多半是误报
+
+
+def _apply_term_map(transcript, fixes):
+    """按「行内定位」应用映射表：只在 context 命中的行里替换，避免污染其他行。
+
+    fixes: [(wrong, right, context), ...]
+    """
+    if not fixes:
+        return transcript, []
+    # 长词优先，避免短词先替换把长词拆坏
+    ordered = sorted(fixes, key=lambda x: -len(x[0]))
+    out_lines, changes = [], []
+    hit = set()
+    for ln in transcript.splitlines():
+        new = ln
+        for w, r, ctx in ordered:
+            if w not in new:
+                continue
+            if ctx and ctx not in new:      # 上下文对不上 → 这行不动
+                continue
+            new = new.replace(w, r)
+            hit.add((w, r, ctx))
+        out_lines.append(new)
+        if new != ln:
+            changes.append((ln, new))
+    if not hit:
+        return transcript, []
+    # 报告用「错词→正确词」，比整行 diff 更易读
+    report = [(w, r) for (w, r, _c) in ordered if (w, r, _c) in hit]
+    return "\n".join(out_lines), report
+
+
 def fix_transcript(transcript, base_url, api_key, model,
                    chunk_chars=ASR_FIX_CHUNK_CHARS, timeout=600):
     """把逐字稿里的 ASR 音近错字改对，其余一个字不动。
@@ -648,17 +786,21 @@ def fix_transcript(transcript, base_url, api_key, model,
     if not transcript.strip():
         return transcript, []
 
-    lines = transcript.splitlines()
-    # 按字符数切块，尽量在行边界断开，保证时间戳不被拆散
-    blocks, buf, cnt = [], [], 0
-    for ln in lines:
-        if cnt + len(ln) > chunk_chars and buf:
-            blocks.append("\n".join(buf))
-            buf, cnt = [], 0
-        buf.append(ln)
-        cnt += len(ln)
-    if buf:
-        blocks.append("\n".join(buf))
+    # 长稿：走「术语映射表」，不重写全文（快一个数量级，且没有行数漂移问题）
+    if len(transcript) > ASR_FIX_LINE_LIMIT:
+        print(f"      转写 {len(transcript)} 字 > {ASR_FIX_LINE_LIMIT}，"
+              f"走长稿模式：术语映射表替代逐行校对")
+        term_map = _extract_term_map(transcript, base_url, api_key, model,
+                                     timeout=max(timeout, 900))
+        fixed, changes = _apply_term_map(transcript, term_map)
+        if not changes:
+            print("      未抽到可靠术语映射，原文沿用")
+        else:
+            print(f"      应用 {len(term_map)} 条映射，命中 {len(changes)} 条术语")
+        return fixed, changes
+
+    # 短稿：走逐行校对（最准，但要求模型原样回写全文）
+    blocks = _split_blocks(transcript, chunk_chars)
 
     sys_p = (
         "你是技术字幕校对员。输入是一段语音识别(ASR)生成的逐字稿，带 [mm:ss] 时间戳。\n"
@@ -679,6 +821,8 @@ def fix_transcript(transcript, base_url, api_key, model,
 
     fixed_blocks, changes = [], []
     for i, blk in enumerate(blocks, 1):
+        # 必须打印:不然模型在生成时(单块可达 1~2 分钟)日志一片空白,看着像卡死
+        print(f"      [{i}/{len(blocks)}] 校对中 ({len(blk.splitlines())} 行) ...", flush=True)
         try:
             out = call_llm(base_url, api_key, model, sys_p,
                            "请校对下面这段逐字稿：\n\n" + blk,
@@ -698,9 +842,12 @@ def fix_transcript(transcript, base_url, api_key, model,
             continue
         fixed_blocks.append(out)
         # 逐行比对留痕
+        nch = 0
         for a, b in zip(blk.splitlines(), out.splitlines()):
             if a != b:
                 changes.append((a, b))
+                nch += 1
+        print(f"      [{i}/{len(blocks)}] 完成: 改动 {nch} 行", flush=True)
 
     return "\n".join(fixed_blocks), changes
 
@@ -801,6 +948,8 @@ def audit_notes(sections, base_url, api_key, model, segs,
     verdicts = {}
     total_items = 0
     for bi, batch in enumerate(batches, 1):
+        # 与 ASR 纠错同理：不打进度的话，几批审核跑下来日志一片空白
+        print(f"      [{bi}/{len(batches)}] 核对中 ({len(batch)} 字) ...", flush=True)
         user_p = ("请逐条核对下列各节知识点。\n\n" + batch +
                   "\n\n输出 JSON：items 覆盖上面出现的每个 P 编号。")
         try:
@@ -1600,10 +1749,13 @@ class _Tee:
     def write(self, s):
         try:
             self.console.write(s)
+            self.console.flush()
         except Exception:
             pass
         try:
+            # 必须立即落盘：否则日志攒满缓冲区才写入，长任务看起来像卡死
             self.logf.write(s)
+            self.logf.flush()
         except Exception:
             pass
 
